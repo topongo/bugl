@@ -1,4 +1,4 @@
 
-[submodule "bugl/TopongoConfig"]
-	path = bugl/TopongoConfig
+[submodule "bugl/TopongoConfigs"]
+	path = bugl/TopongoConfigs
 	url = https://github.com/topongo/TopongoConfigs
