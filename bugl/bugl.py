@@ -2,17 +2,23 @@ import curses
 import subprocess
 import os
 from datetime import datetime, timedelta
-from TopongoConfig.configs import Configs
+from TopongoConfigs.configs import Configs
+from getpass import getpass
+from sww import SafeWinWrapper
+from sync import Sync, RConfigs
 
 
-def prepare_path(_f, _c_f=False):
-    _f = os.path.expandvars(_f)
+def prepare_path(_f, _c_f=False, _folder=False):
+    _f = os.path.expanduser(os.path.expandvars(_f))
     if not os.path.exists(_f):
-        if not os.path.exists(os.path.dirname(_f)):
-            os.makedirs(os.path.dirname(_f))
-        if _c_f:
-            with open(_f, "a"):
-                pass
+        if _folder:
+            os.makedirs(_f)
+        else:
+            if not os.path.exists(os.path.dirname(_f)) and os.path.dirname(_f) != "":
+                os.makedirs(os.path.dirname(_f))
+            if _c_f:
+                with open(_f, "a"):
+                    pass
 
 
 def time_elapsed(_d: timedelta, none_word="Now", form="{}"):
@@ -29,78 +35,6 @@ def time_elapsed(_d: timedelta, none_word="Now", form="{}"):
     else:
         out += none_word
     return form.format(out)
-
-
-class SafeWinWrapper:
-    def __init__(self, win: curses.window):
-        self.win = win
-        self._refresh_defaults = None
-
-    def getmaxyx(self):
-        return tuple((_i - 1 for _i in self.win.getmaxyx()))
-
-    def addstr(self, _y: int, _x: int, _str, _attr=0, _mode="cut", h_align=None, k_align=True):
-        _my, _mx = self.getmaxyx()
-        if type(_str) is not str:
-            try:
-                _str = str(_str)
-            except ValueError:
-                raise ValueError(f"Cannot Convert {type(_str).__name__} to string")
-        if not (0 <= _x < _mx):
-            raise IndexError(f"x coord out of range: not(0 <= {_x} < {_mx})")
-        if not (0 <= _y < _my):
-            raise IndexError(f"y coord out of range: not(0 <= {_y} < {_my})")
-        if _mode == "wrap":
-            if h_align is not None:
-                raise TypeError("h_align argument only allowed when _mode argument is set to \"cut\"")
-            if len(_str) > (_my-_y)*(_mx+1) + _mx - _x:
-                raise IndexError("text overflow on the br corner")
-            self.win.addstr(_y, _x, _str, _attr)
-        elif _mode == "wrap_word":
-            _str.replace("\n", " ")
-            _l = 0
-            _buff = ""
-            for _w in _str.split():
-                if len(_buff) == 0 and len(_w):
-                    self.win.addstr(_y+_l, _x if (k_align or _l == 0) else 0, _w[:_mx+1-(_x if (k_align or _l == 0) else 0)], _attr)
-                    _l += 1
-                elif len(_buff+_w) >= _mx+1:
-                    self.win.addstr(_y+_l, _x, _buff, _attr)
-                    _buff = ""
-                    _l += 1
-                else:
-                    _buff += _w
-            self.win.addstr(_y+_l, _x, _buff, _attr)
-
-        elif _mode == "cut":
-            self.win.addstr(_y, _x, _str[:_mx-_x+1], _attr)
-        else:
-            raise ValueError("_mode argument must be either \"cut\", \"wrap\", \"wrap_word\" or omitted.")
-
-    def timeout(self, *args, **kwargs):
-        return self.win.timeout(*args, **kwargs)
-
-    def getch(self):
-        return self.win.getch()
-
-    def refresh(self, *args, **kwargs):
-        if self._refresh_defaults is None or len(args) > 0 or len(kwargs) > 0:
-            return self.win.refresh(*args, **kwargs)
-        else:
-            r_args = tuple((_i if type(_i) is int else _i(None) for _i in self._refresh_defaults))
-            return self.win.refresh(*r_args)
-
-    def clear(self):
-        return self.win.clear()
-
-    def vline(self, *args, **kwargs):
-        return self.win.vline(*args, **kwargs)
-
-    def resize(self, *args, **kwargs):
-        return self.win.resize(*args, **kwargs)
-
-    def refresh_defaults(self, *args):
-        self._refresh_defaults = args
 
 
 class Game:
@@ -121,9 +55,11 @@ class Game:
         self.conf.set("latest_launch", datetime.now().timestamp())
         self.conf.game_conf.write()
         self._session_started = True
+        for _i in ("stdout", "stderr"):
+            prepare_path(self.conf.get(_i))
         self._proc = subprocess.Popen(args,
-                                      stdout=open(self.conf.get("stdout"), "w+"),
-                                      stderr=open(self.conf.get("stderr"), "w+"),
+                                      stdout=open(self.conf.get("stdout", path=True), "w+"),
+                                      stderr=open(self.conf.get("stderr", path=True), "w+"),
                                       stdin=subprocess.DEVNULL)
 
     def name(self):
@@ -160,14 +96,14 @@ class Game:
             self.game_conf = game_conf
             self.parent_conf = parent_conf
 
-        def get(self, key):
+        def get(self, key, path=False):
             try:
-                val = self.game_conf.get(key)
+                val = self.game_conf.get(key, path)
             except KeyError:
                 try:
-                    val = self.parent_conf.get(key)
+                    val = self.parent_conf.get(key, path)
                     for _r in self.PLACEHOLDERS:
-                        val = val.replace(f"%{_r}", self.game_conf.get(self.PLACEHOLDERS[_r]))
+                        val = val.replace(f"%{_r}", self.game_conf.get(self.PLACEHOLDERS[_r], path))
                 except KeyError:
                     raise KeyError(key)
             if type(val) is str:
@@ -202,12 +138,21 @@ class Game:
 class Bugl:
     VERSION = 0.2
 
-    def __init__(self, conf: Configs):
+    def __init__(self, conf: Configs, sync_conf: Configs):
         try:
             from bugl.templates import game_defaults as _c_d
         except ModuleNotFoundError:
             from templates import game_defaults as _c_d
         self.conf = conf
+        if sync_conf:
+            from sync import Sync
+            self.sync = Sync(sync_conf, getpass)
+            self.sync.connect()
+            """
+            from templates import sync_defaults
+            x = RConfigs(self.sync,  sync_defaults, "sync.json")
+            print(x.get("signature"))
+            """
         self.game_defaults = Game.GameConfig(_c_d, self.conf).game_conf
         self._games = []
         self._selected = None
@@ -222,6 +167,8 @@ class Bugl:
         return self._games.index(_g)
 
     def select(self, _i):
+        if not self._games:
+            return
         if type(_i) is int:
             if len(self._games) > _i >= 0:
                 self._selected = self._games[_i]
@@ -243,7 +190,38 @@ class Bugl:
             else:
                 raise ValueError
 
+    """
+    def sync_conf(self, conf: Configs, ow=True, callback=None):
+        def mtime(path):
+            return datetime.fromtimestamp(os.stat(path).st_mtime), self.sync.sftp.stat(path).st_mtime
+
+        def upload():
+            if callback:
+                self.sync.sftp.put(conf.config_path, conf.config_path, callback=callback)
+            else:
+                self.sync.sftp.put(conf.config_path, conf.config_path)
+
+        if conf.config_path in self.sync.sftp.listdir():
+            if not ow:
+                if self.sync.hash_compare(conf.config_path):
+                    return
+                else:
+                    raise FileExistsError
+            else:
+                l_mtime, r_mtime = mtime(conf.config_path)
+                if l_mtime > r_mtime:
+                    # local file is newer, upload
+                    upload()
+                elif l_mtime < r_mtime:
+                    # local file is older, download
+                    pass
+        else:
+            # file not found on remote, upload
+            upload()
+    """
+
     def write(self):
+        self.conf.set("signature", self.sync.conf.get("signature"))
         self.conf.write()
         for _g in self._games:
             _g.conf.game_conf.write()
@@ -253,6 +231,9 @@ class Bugl:
 
     def render_details(self, win: SafeWinWrapper, selected=None):
         win.addstr(0, 0, "Details")
+        if not self._selected:
+            win.addstr(3, 0, "Wow, such empty", h_center=True)
+            return
         for _i, (_n, _p) in enumerate(self._selected.get_details()):
             win.addstr(_i*2+1, 1, f'{_n}:', curses.A_REVERSE)
             if _n == "Last Played" and len(_p) > win.getmaxyx()[1]:
@@ -285,11 +266,54 @@ class Bugl:
         def return_(self):
             return self._ret
 
+    class ProgressDialog:
+        def __init__(self, diag: SafeWinWrapper, msg, button):
+            self._win = diag
+            self.progress = 0.0
+            self._msg = msg
+            self.maxy, self.maxx = self._win.getmaxyx()
+            self._win.addstr(1, 1, self._msg)
+            self._l = self.maxx - 4
+            self._slices = (1, )
+            self._cur_slice = 0
+            self.button = button
+            self.update(0, 1)
+
+        def set_slices(self, _s=(1, )):
+            self._slices = _s
+
+        def update_msg(self, msg):
+            self._win.addstr(1, 1, " "*len(self._msg))
+            self._msg = msg
+            self._win.addstr(1, 1, self._msg)
+
+        def update(self, _p, _t):
+            _prog = _p / _t
+            if self._cur_slice == 0:
+                _s = 0
+            else:
+                _s = self._slices[self._cur_slice-1]
+            _e = self._slices[self._cur_slice]
+            _str = ("#" * int(_s*self._l))
+            _str += ("#" * int(_prog*(_e-_s)*(self._l+1)))
+            _str += ("-" * (self._l - len(_str)))
+            self._win.addstr(self.maxy-3, 0, _str, h_center=True)
+            self._win.addstr(self.maxy-2, 0, f"{round((_s+_prog*(_e-_s))*100, 2)}%", h_center=True)
+            self._win.refresh()
+
+        def next_slice(self):
+            self._cur_slice += 1
+
+        def finish(self):
+            self.update(1, 1)
+            self.button.render(True)
+            self._win.refresh()
+
     def dialog(self, win: SafeWinWrapper, title, msg, _type="alert", tooltip="dialog", butts=None, _placeholder=""):
         self.render_tooltip(win, tooltip)
         maxy, maxx = win.getmaxyx()
         d_maxy, d_maxx = int(maxy / 4), int(maxx / 2)
-        diag = curses.newwin(d_maxy + 1, d_maxx + 1, int((maxy / 2) - (d_maxy / 2)), int((maxx / 2) - (d_maxx / 2)))
+        diag = SafeWinWrapper(curses.newwin(d_maxy + 2, d_maxx + 2, int((maxy / 2) - (d_maxy / 2)), int((maxx / 2) - (d_maxx / 2))))
         diag.border()
         diag.addstr(0, int(d_maxx / 2 - len(title) / 2), title)
         if _type != "insert":
@@ -298,6 +322,8 @@ class Bugl:
             buttons = [
                 self.Button(diag, d_maxy, int(d_maxx / 2 - len("Ok") / 2), "Ok")
             ]
+        elif _type == "progress":
+            return self.ProgressDialog(diag, msg, self.Button(diag, d_maxy, int((d_maxx / 4 * 3) - len("Ok") / 2), "Ok"))
         elif _type == "insert" or _type == "confirm":
             if butts is None:
                 butts = ("Ok", "Cancel")
@@ -354,12 +380,17 @@ class Bugl:
         curses.curs_set(False)
         p_g_select = SafeWinWrapper(curses.newpad(300, int(maxx/2)-1))
         p_g_details = SafeWinWrapper(curses.newpad(300, int(maxx/2)-1))
+        if not self._games:
+            self.dialog(scr, f"No games found", f"No games found under the game library path ({self.conf.get('games_folder')})")
         self.select(0)
+        scr.clear()
         scr.refresh()
+        # synced = False
 
         while True:
             maxy, maxx = scr.getmaxyx()
-            self._selected.update_playtime()
+            if self._selected:
+                self._selected.update_playtime()
             p_g_details.refresh_defaults(0, 0, 0, lambda l: int(scr.getmaxyx()[1]/2)+1, lambda l: scr.getmaxyx()[0]-1, lambda l: scr.getmaxyx()[1])
             p_g_select.refresh_defaults(0, 0, 0, 0, lambda l: scr.getmaxyx()[0]-1, lambda l: int(scr.getmaxyx()[1]/2))
 
@@ -382,6 +413,22 @@ class Bugl:
             p_g_details.refresh()
 
             self.render_tooltip(scr, "main")
+
+            """if not synced:
+                sync_prog = self.dialog(scr, "Syncing with remote", "Connecting to remote", "progress")
+                sync_prog.set_slices((1/4, 2/4, 3/4, 1))
+                self.sync.connect()
+                sync_prog.update(1, 1)
+                for _m, _f in [
+                    ("Syncing bugl configs...", lambda l: self.sync_conf(self.conf, callback=sync_prog.update)),
+                    ("Syncing games configs...", lambda l: self.sync_games(callback=sync_prog.update))
+                ]:
+                    sync_prog.next_slice()
+                    _f()
+                sync_prog.finish()
+
+                synced = True"""
+
             inp = scr.getch()
 
             if inp == curses.KEY_DOWN:
@@ -389,7 +436,8 @@ class Bugl:
             if inp == curses.KEY_UP:
                 self.select("prev")
             elif inp == curses.KEY_ENTER or inp == ord("\n"):
-                self._selected.run()
+                if self._selected:
+                    self._selected.run()
                 """
                 while True:
                     if not bugl.g().is_alive():
@@ -440,26 +488,40 @@ class Bugl:
 if __name__ == "__main__":
     try:
         from bugl.templates import bugl_defaults
+        from bugl.templates import sync_defaults
     except ModuleNotFoundError:
         from templates import bugl_defaults
+        from templates import sync_defaults
 
     if os.name == "nt":
-        CONFIGS = "%USERPROFILE%/bugl/config.json"
+        CONFIGS = "~/Documents/bugl/"
     else:
-        CONFIGS = "$HOME/.config/bugl/config.json"
-    CONFIGS = os.path.expandvars(CONFIGS)
+        CONFIGS = "~/.config/bugl/"
+    CONFIGS = os.path.expanduser(CONFIGS)
 
-    if not os.path.exists(CONFIGS):
-        if not os.path.isdir(os.path.dirname(CONFIGS)):
-            os.makedirs(os.path.dirname(CONFIGS))
-        g_conf = Configs(bugl_defaults)
-        g_conf.write(CONFIGS)
+    prepare_path(CONFIGS)
+    os.chdir(CONFIGS)
+    if not os.path.exists(CONFIGS+"config.json"):
+        prepare_path("config.json")
+        g_conf = Configs(bugl_defaults, config_path="config.json", write=True)
+        g_conf.write("config.json")
     else:
-        g_conf = Configs(bugl_defaults, config_path=CONFIGS)
-    bugl = Bugl(g_conf)
-    for _c in os.listdir(f"{os.path.dirname(CONFIGS)}/games/"):
+        g_conf = Configs(bugl_defaults, config_path="config.json")
+
+    if not os.path.exists("sync.json"):
+        prepare_path("sync.json")
+        s_conf = Configs(sync_defaults, config_path="sync.json", write=True)
+        s_conf.write("sync.json")
+    else:
+        s_conf = Configs(sync_defaults, config_path="sync.json")
+
+    if g_conf.get("signature") == "":
+        g_conf.set("signature", s_conf.get("signature"))
+    bugl = Bugl(g_conf, s_conf)
+    prepare_path(bugl.conf.get("games_folder"), _folder=True)
+    for _c in os.listdir("games"):
         if _c.split(".")[-1] == "json":
-            bugl.add_game(f"{os.path.dirname(CONFIGS)}/games/{_c}")
+            bugl.add_game(f"games/{_c}")
 
     try:
         curses.wrapper(lambda l: bugl.gui(SafeWinWrapper(l)))
