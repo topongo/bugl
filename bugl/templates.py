@@ -4,6 +4,7 @@ bugl_defaults = {
     "stdout": "~/.log/bugl/%i/out.log",
     "stderr": "~/.log/bugl/%i/err.log",
     "games_folder": "~/.config/bugl/games/",
+    "ignore_missing_host": False,
     "signature": ""
 }
 

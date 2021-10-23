@@ -3,7 +3,6 @@ import subprocess
 import os
 from datetime import datetime, timedelta
 from TopongoConfigs.configs import Configs
-from getpass import getpass
 from sww import SafeWinWrapper
 from sync import Sync, RConfigs
 
@@ -41,9 +40,9 @@ class Game:
     class PollBeforeStartException(Exception):
         pass
 
-    def __init__(self, conf: Configs, bugl):
-        self.conf = self.GameConfig(conf, bugl.conf)
-        self.bugl = bugl
+    def __init__(self, conf: Configs, _bugl):
+        self.conf = self.GameConfig(conf, _bugl.conf)
+        self.bugl = _bugl
         self._proc = None
         self._session_started = False
         self._init_playtime = self.conf.get("playtime")
@@ -144,19 +143,36 @@ class Bugl:
         except ModuleNotFoundError:
             from templates import game_defaults as _c_d
         self.conf = conf
-        if sync_conf:
-            from sync import Sync
-            self.sync = Sync(sync_conf, getpass)
-            self.sync.connect()
-            """
-            from templates import sync_defaults
-            x = RConfigs(self.sync,  sync_defaults, "sync.json")
-            print(x.get("signature"))
-            """
+        self.sync_c = sync_conf
+        self.sync = None
         self.game_defaults = Game.GameConfig(_c_d, self.conf).game_conf
         self._games = []
         self._selected = None
         self._section = "main"
+
+    def _init_sync(self, scr):
+        if not self.sync:
+            self.sync = Sync(self.sync_c, lambda l: self.dialog(scr, l, "Password:", "password"))
+
+        if not self.sync.sftp:
+            try:
+                self.sync.connect()
+            except self.DialogCancel:
+                return False
+            except Sync.AuthError:
+                scr.erase()
+                self.dialog(scr, "Connection Error",
+                            "Authentication error, the password you entered is wrong or invalid.")
+                return False
+            except Sync.NoHostSet:
+                scr.erase()
+                self.dialog(scr, "Connection Error",
+                            f"No host set in config file ({os.path.abspath(self.sync.conf.config_path)})")
+
+        return True
+
+    def render_loading(self, scr, title):
+        self.dialog(scr, title, "Loading...", _type="blank")
 
     def add_game(self, _config_path):
         self._games.append(Game(Configs(self.game_defaults, config_path=_config_path), self))
@@ -190,41 +206,46 @@ class Bugl:
             else:
                 raise ValueError
 
-    """
-    def sync_conf(self, conf: Configs, ow=True, callback=None):
+    def sync_conf(self, conf: Configs, callback=None, win=None):
+        conf.write()
+
         def mtime(path):
-            return datetime.fromtimestamp(os.stat(path).st_mtime), self.sync.sftp.stat(path).st_mtime
+            return datetime.fromtimestamp(os.stat(path).st_mtime), \
+                   datetime.fromtimestamp(self.sync.sftp.stat(path).st_mtime)
 
-        def upload():
-            if callback:
-                self.sync.sftp.put(conf.config_path, conf.config_path, callback=callback)
-            else:
-                self.sync.sftp.put(conf.config_path, conf.config_path)
+        if self.sync.exists(conf.config_path):
+            if self.sync.hash_compare(conf.config_path):
+                # files on local and remote are identical
+                if callback:
+                    callback(1, 1)
+                if win:
+                    self.dialog(win, "No sync required", "Files are identical")
+                return
 
-        if conf.config_path in self.sync.sftp.listdir():
-            if not ow:
-                if self.sync.hash_compare(conf.config_path):
-                    return
-                else:
-                    raise FileExistsError
             else:
                 l_mtime, r_mtime = mtime(conf.config_path)
                 if l_mtime > r_mtime:
                     # local file is newer, upload
-                    upload()
+                    self.sync.upload(conf.config_path, callback=callback)
                 elif l_mtime < r_mtime:
-                    # local file is older, download
-                    pass
+                    self.sync.download(conf.config_path, callback=callback)
         else:
             # file not found on remote, upload
-            upload()
-    """
+            self.sync.upload(conf.config_path, callback=callback)
 
-    def write(self):
-        self.conf.set("signature", self.sync.conf.get("signature"))
+    def write(self, sync=False):
+        self.conf.set("signature", self.sync_c.get("signature"))
         self.conf.write()
         for _g in self._games:
             _g.conf.game_conf.write()
+        if sync:
+            self._sync_all()
+
+    def _sync_all(self):
+        if self.sync and self.sync.sftp:
+            self.sync_conf(self.conf)
+            for _g in self._games:
+                self.sync_conf(_g.conf.game_conf)
 
     def ls_games(self, win):
         pass
@@ -246,7 +267,7 @@ class Bugl:
         msg = f"BUGL {self.VERSION} - "
         msg += {
             "main": f"[{chr(8593)+chr(8595)}] to navigate, [Enter] to play, "
-                    f"[Q] to exit.",
+                    f"[S] to sync, [Q] to exit.",
             "dialog": f"[{chr(8592)+chr(8594)}] to navigate, [Enter] to select.",
         }[_section]
         msg += (" " * (win.getmaxyx()[1] - 1 - len(msg)))
@@ -309,22 +330,33 @@ class Bugl:
             self.button.render(True)
             self._win.refresh()
 
-    def dialog(self, win: SafeWinWrapper, title, msg, _type="alert", tooltip="dialog", butts=None, _placeholder=""):
+    class DialogCancel(Exception):
+        pass
+
+    def dialog(self, win: SafeWinWrapper, title, msg, _type="alert", tooltip="dialog", butts=None, _placeholder=None):
         self.render_tooltip(win, tooltip)
         maxy, maxx = win.getmaxyx()
-        d_maxy, d_maxx = int(maxy / 4), int(maxx / 2)
-        diag = SafeWinWrapper(curses.newwin(d_maxy + 2, d_maxx + 2, int((maxy / 2) - (d_maxy / 2)), int((maxx / 2) - (d_maxx / 2))))
+        d_maxy, d_maxx = 6, int(maxx / 2)
+        diag = SafeWinWrapper(curses.newwin(d_maxy + 2,
+                                            d_maxx + 2,
+                                            int((maxy / 2) - (d_maxy / 2)),
+                                            int((maxx / 2) - (d_maxx / 2))))
         diag.border()
-        diag.addstr(0, int(d_maxx / 2 - len(title) / 2), title)
-        if _type != "insert":
-            diag.addstr(1, 1, msg)
+        diag.addstr(1, int(d_maxx / 2 - len(title) / 2) + 1, title, curses.A_REVERSE)
+        if _type != "password":
+            diag.addstr(2, 2, msg, _mode="wrap_word")
         if _type == "alert":
             buttons = [
                 self.Button(diag, d_maxy, int(d_maxx / 2 - len("Ok") / 2), "Ok")
             ]
+        elif _type == "blank":
+            win.refresh()
+            diag.refresh()
+            return
         elif _type == "progress":
-            return self.ProgressDialog(diag, msg, self.Button(diag, d_maxy, int((d_maxx / 4 * 3) - len("Ok") / 2), "Ok"))
-        elif _type == "insert" or _type == "confirm":
+            return self.ProgressDialog(diag, msg,
+                                       self.Button(diag, d_maxy, int((d_maxx / 4 * 3) - len("Ok") / 2), "Ok"))
+        elif _type == "password" or _type == "confirm":
             if butts is None:
                 butts = ("Ok", "Cancel")
             buttons = [
@@ -332,40 +364,50 @@ class Bugl:
                 self.Button(diag, d_maxy, int((d_maxx / 4 * 3) - len(butts[1]) / 2), butts[1], False)
             ]
         else:
+            diag.erase()
             raise TypeError
         win.refresh()
-        sel = 0
-        ins = _placeholder
+        if type(_placeholder) is int and _placeholder < len(buttons):
+            sel = _placeholder
+        else:
+            sel = 0
+        ins = ""
         while True:
+            if _type == "password":
+                diag.addstr(3, 3, " " * (d_maxx - 4), curses.A_REVERSE)
+                diag.addstr(3, 3, "*" * len(ins) + "_", curses.A_REVERSE)
+
             for _nb, _b in enumerate(buttons):
                 _b.render(_nb == sel)
                 diag.refresh()
 
-            if ins:
-                diag.addstr(1, 1, (d_maxx-2)*" ")
-                diag.addstr(1, 1, ins)
-
-            win.refresh()
             _inp = win.getch()
-            if _type == "insert":
-                if _inp == ord("\t"):
+            if _type == "password":
+                if _inp == ord("\t") or _inp in (curses.KEY_LEFT, curses.KEY_RIGHT):
                     sel = 1 - sel
                 elif _inp == curses.KEY_BACKSPACE or _inp == 127:
-                    if len(ins) > 0:
+                    if len(ins) > 1:
                         ins = ins[:len(ins) - 1]
+                    else:
+                        ins = ""
                 elif _inp == curses.KEY_ENTER or _inp == ord("\n"):
                     diag.untouchwin()
                     if buttons[sel].return_():
                         return ins
+                    else:
+                        diag.erase()
+                        raise self.DialogCancel
                 else:
+                    if _inp in (curses.KEY_UP, curses.KEY_DOWN):
+                        continue
                     try:
-                        b = chr(_inp)
-                        ins += b
+                        ins += chr(_inp)
                     except ValueError:
                         pass
             else:
                 if _inp == curses.KEY_ENTER or _inp == ord("\n"):
                     diag.untouchwin()
+                    diag.erase()
                     return buttons[sel].return_()
                 elif _inp == curses.KEY_LEFT:
                     if sel - 1 >= 0:
@@ -373,6 +415,7 @@ class Bugl:
                 elif _inp == curses.KEY_RIGHT:
                     if sel + 1 <= len(buttons) - 1:
                         sel += 1
+        diag.erase()
 
     def gui(self, scr: SafeWinWrapper):
         maxy, maxx = scr.getmaxyx()
@@ -381,9 +424,18 @@ class Bugl:
         p_g_select = SafeWinWrapper(curses.newpad(300, int(maxx/2)-1))
         p_g_details = SafeWinWrapper(curses.newpad(300, int(maxx/2)-1))
         if not self._games:
-            self.dialog(scr, f"No games found", f"No games found under the game library path ({self.conf.get('games_folder')})")
+            self.dialog(scr, f"No games found",
+                        f"No games found under the game library path ({self.conf.get('games_folder')})")
+        if self.sync_c.get("host") is None and not self.conf.get("ignore_missing_host"):
+            if self.dialog(scr, f"No host set",
+                           f"Warning: no remote host set for synchronization, set it in the sync.json file "
+                           f"({os.path.abspath(self.sync_c.config_path)}).\n"
+                           f"Disable this warning?",
+                           "confirm", _placeholder=1, butts=("Yes", "No")):
+                self.conf.set("ignore_missing_host", True)
+                self.write()
         self.select(0)
-        scr.clear()
+        scr.erase()
         scr.refresh()
         # synced = False
 
@@ -391,11 +443,21 @@ class Bugl:
             maxy, maxx = scr.getmaxyx()
             if self._selected:
                 self._selected.update_playtime()
-            p_g_details.refresh_defaults(0, 0, 0, lambda l: int(scr.getmaxyx()[1]/2)+1, lambda l: scr.getmaxyx()[0]-1, lambda l: scr.getmaxyx()[1])
-            p_g_select.refresh_defaults(0, 0, 0, 0, lambda l: scr.getmaxyx()[0]-1, lambda l: int(scr.getmaxyx()[1]/2))
+            p_g_details.refresh_defaults(0,
+                                         0,
+                                         0,
+                                         lambda l: int(scr.getmaxyx()[1]/2)+1,
+                                         lambda l: scr.getmaxyx()[0]-1,
+                                         lambda l: scr.getmaxyx()[1])
+            p_g_select.refresh_defaults(0,
+                                        0,
+                                        0,
+                                        0,
+                                        lambda l: scr.getmaxyx()[0]-1,
+                                        lambda l: int(scr.getmaxyx()[1]/2))
 
-            p_g_select.clear()
-            p_g_details.clear()
+            p_g_select.erase()
+            p_g_details.erase()
             # p_g_details.border()
             # p_g_select.border()
             scr.vline(0, int(maxx/2), curses.ACS_VLINE, maxy)
@@ -445,7 +507,7 @@ class Bugl:
                         break
                     sleep(1)
                 if bugl.g().poll() != 0:
-                    scr.clear()
+                    scr.erase()
                     with open(bugl.g().conf.get("stderr")) as _e:
                         max_len = maxy - 1
                         lines = []
@@ -460,29 +522,46 @@ class Bugl:
                         scr.addstr(_ln + 1, 0, _l[:maxx])
                     scr.refresh()
                     scr.getch()
-                    scr.clear()
+                    scr.erase()
                 scr.addstr(maxy, 0, "Press any key to continue...")
                 scr.refresh()
                 sleep(1)
                 scr.getch()
                 """
             elif inp == curses.KEY_EXIT or inp == ord("q"):
-                if self.dialog(scr, "Quit?", "Are you sure you want to quit?", _type="confirm"):
+                if self.dialog(scr, "Quit", "Are you sure you want to quit?", "confirm"):
+                    if not self.sync or not self.sync.sftp:
+                        if self.dialog(scr, "Quit", "Connect to remote and sync before exiting?", "confirm",
+                                       _placeholder=1, butts=("Yes", "No")):
+                            self.render_loading(scr, "Connecting")
+                            if self._init_sync(scr):
+                                self.render_loading(scr, "Syncing")
+                                self.write(sync=True)
                     return
                 else:
-                    scr.clear()
+                    scr.erase()
                     continue
+            elif inp == curses.KEY_EXIT or inp == ord("s"):
+                self.render_loading(scr, "Connecting")
+                if self._init_sync(scr):
+                    self.render_loading(scr, "Syncing")
+                    if self._selected:
+                        self.sync_conf(self._selected.conf.game_conf, win=scr)
+                    else:
+                        self._sync_all()
+                    curses.napms(1000)
+                scr.erase()
             elif inp == curses.KEY_RESIZE:
                 maxy, maxx = scr.getmaxyx()
                 p_g_select.resize(300, int(maxx/2))
                 p_g_details.resize(300, int(maxx/2))
                 while maxy < len(list(self._games))+5 or maxx < 2+2+30+30:
-                    scr.clear()
+                    scr.erase()
                     scr.addstr(0, 0, f"Term too little (at least {len(list(self._games))+5}x{2+2+30+30})")
                     scr.refresh()
                     scr.getch()
                     maxy, maxx = scr.getmaxyx()
-                scr.clear()
+                scr.erase()
 
 
 if __name__ == "__main__":

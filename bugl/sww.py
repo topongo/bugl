@@ -27,20 +27,30 @@ class SafeWinWrapper:
                 raise IndexError("text overflow on the br corner")
             self.win.addstr(_y, _x, _str, _attr)
         elif _mode == "wrap_word":
-            _str.replace("\n", " ")
-            _l = 0
             _buff = ""
-            for _w in _str.split():
-                if len(_buff) == 0 and len(_w):
-                    self.win.addstr(_y+_l, _x if (k_align or _l == 0) else 0, _w[:_mx+1-(_x if (k_align or _l == 0) else 0)], _attr)
-                    _l += 1
-                elif len(_buff+_w) >= _mx+1:
-                    self.win.addstr(_y+_l, _x, _buff, _attr)
-                    _buff = ""
-                    _l += 1
+            _process = []
+            rows = []
+            for _w in _str.split(" "):
+                if "\n" in _w:
+                    _process += [("" if n == 0 else "\n")+i for n, i in enumerate(_w.split("\n"))]
                 else:
-                    _buff += _w
-            self.win.addstr(_y+_l, _x, _buff, _attr)
+                    _process.append(_w)
+
+            for _w in _process:
+                if _w[0] == "\n":
+                    rows.append(_buff)
+                    _buff = ""
+                    _w = _w[1:]
+                if len(_buff) == 0 and len(_w) > _mx:
+                    rows.append(_w[:_mx+1-(_x if k_align else 0)])
+                elif len(_buff+_w) >= _mx+1:
+                    rows.append(_buff)
+                    _buff = ""
+                else:
+                    _buff += _w + " "
+            rows.append(_buff)
+            for _n, _i in enumerate(rows):
+                self.win.addstr(_y + _n, _x if k_align else 0, _i, _attr)
 
         elif _mode == "cut":
             _str_cut = _str[:_mx-_x+1]
@@ -63,8 +73,8 @@ class SafeWinWrapper:
             r_args = tuple((_i if type(_i) is int else _i(None) for _i in self._refresh_defaults))
             return self.win.refresh(*r_args)
 
-    def clear(self):
-        return self.win.clear()
+    def erase(self):
+        return self.win.erase()
 
     def vline(self, *args, **kwargs):
         return self.win.vline(*args, **kwargs)
