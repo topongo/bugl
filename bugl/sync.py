@@ -160,7 +160,7 @@ class Sync:
                 _s.update(_b)
         return _s.hexdigest()
 
-    def hash_compare(self, l_path, r_path=False, abs=False):
+    def hash_compare(self, l_path, r_path=False):
         _s = sha256()
         with open(l_path, "rb") as _f:
             while True:
