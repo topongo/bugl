@@ -3,6 +3,7 @@ import json
 from paramiko import SSHClient, RSAKey, AutoAddPolicy, ssh_exception
 from TopongoConfigs.configs import Configs
 from hashlib import sha256
+from stat import S_ISDIR
 
 
 class Sync:
@@ -14,11 +15,6 @@ class Sync:
 
     def __init__(self, _conf, _password_mtd=None, _full_init=False):
         self.conf = _conf
-        if self.conf.get("signature") == "":
-            sig = sha256()
-            sig.update(os.urandom(4096))
-            self.conf.set("signature", sig.hexdigest())
-            self.conf.write()
         self.ssh = SSHClient()
         self.pwd_mtd = _password_mtd
         self.ssh.set_missing_host_key_policy(AutoAddPolicy())
@@ -71,15 +67,19 @@ class Sync:
                     raise self.AuthError("No method supplied for password retrieving")
 
     def prepare_path(self, path):
+        created = []
         path = path.replace("~", f"/home/{self.conf.get('user')}")
         try:
             self.sftp.stat(path)
         except IOError:
             try:
                 self.sftp.mkdir(path)
+                created.append(path)
             except IOError:
                 self.prepare_path(os.path.abspath(os.path.join(path, os.path.pardir)))
                 self.sftp.mkdir(path)
+                created.append(path)
+        return created
 
     class NoHostSet(Exception):
         pass
@@ -126,6 +126,20 @@ class Sync:
         self.ssh.close()
         self._update_status()
 
+    def r_walk(self, path):
+        files = []
+        folders = []
+        for f in self.sftp.listdir_attr(path):
+            if S_ISDIR(f.st_mode):
+                folders.append(f.filename)
+            else:
+                files.append(f.filename)
+        yield path, folders, files
+        for folder in folders:
+            new_path = os.path.join(path, folder)
+            for _i in self.r_walk(new_path):
+                yield _i
+
     def upload(self, local, remote=None, callback=None):
         if self.sftp is None:
             self.connect()
@@ -136,6 +150,7 @@ class Sync:
             self.sftp.put(local, remote, callback=callback)
         else:
             self.sftp.put(local, remote)
+        return [remote]
 
     def download(self, remote, local=None, callback=None):
         if self.sftp is None:
@@ -147,6 +162,30 @@ class Sync:
             self.sftp.get(local, remote, callback=callback)
         else:
             self.sftp.get(local, remote)
+        return [local]
+
+    def download_a(self, remote, local=None, diag_callback=None):
+        # TODO: add full support for progress dialog objects
+        created = []
+        if local is None:
+            local = remote
+        for _p, _d, _f in self.r_walk(remote):
+            if not os.path.exists(_p):
+                created += self.prepare_path(_p)
+            else:
+                if not os.path.isdir(_p):
+                    raise FileExistsError(f"{_p} exists locally")
+            for _ff in _f:
+                if _ff not in os.listdir(_p):
+                    created += self.download(os.path.join(_p, _ff), os.path.join(_p.replace(remote, local), _ff))
+            for _dd in _d:
+                if not os.path.exists(os.path.join(_p, _dd)):
+                    os.mkdir(os.path.join(_p, _dd))
+                    created.append(os.path.join(_p, _dd))
+                else:
+                    if not os.path.isdir(os.path.join(_p, _dd)):
+                        raise FileExistsError(f"{os.path.join(_p, _dd)} exists locally")
+        return created
 
     def r_checksum(self, path):
         if os.path.basename(path) not in self.sftp.listdir(os.path.dirname(path)):

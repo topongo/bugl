@@ -4,8 +4,7 @@ bugl_defaults = {
     "stdout": "~/.log/bugl/%i/out.log",
     "stderr": "~/.log/bugl/%i/err.log",
     "games_folder": "~/.config/bugl/games/",
-    "ignore_missing_host": False,
-    "signature": ""
+    "ignore_missing_host": False
 }
 
 game_defaults = {
@@ -15,8 +14,7 @@ game_defaults = {
     "exec_path": "",
     "exec_args": [],
     "latest_launch": -1.0,
-    "playtime": 0.0,
-    "signature": ""
+    "playtime": 0.0
 }
 
 game_shared = (
@@ -30,6 +28,5 @@ sync_defaults = {
     "port": 22,
     "private_key_path": None,
     "mode": Sync.PWD,
-    "remote_path": "~/.config/bugl/",
-    "signature": ""
+    "remote_path": "~/.config/bugl/"
 }

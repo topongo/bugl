@@ -2,7 +2,7 @@ import curses
 
 
 class SafeWinWrapper:
-    def __init__(self, win: curses.window):
+    def __init__(self, win):
         self.win = win
         self._refresh_defaults = None
 
@@ -90,4 +90,3 @@ class SafeWinWrapper:
 
     def untouchwin(self, *args, **kwargs):
         self.win.untouchwin(*args, **kwargs)
-

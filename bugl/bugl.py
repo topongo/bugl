@@ -168,6 +168,7 @@ class Bugl:
                 scr.erase()
                 self.dialog(scr, "Connection Error",
                             f"No host set in config file ({os.path.abspath(self.sync.conf.config_path)})")
+                return False
 
         return True
 
@@ -234,7 +235,6 @@ class Bugl:
             self.sync.upload(conf.config_path, callback=callback)
 
     def write(self, sync=False):
-        self.conf.set("signature", self.sync_c.get("signature"))
         self.conf.write()
         for _g in self._games:
             _g.conf.game_conf.write()
@@ -271,7 +271,7 @@ class Bugl:
             "dialog": f"[{chr(8592)+chr(8594)}] to navigate, [Enter] to select.",
         }[_section]
         msg += (" " * (win.getmaxyx()[1] - 1 - len(msg)))
-        win.win.addstr(win.getmaxyx()[0]-1, 0, msg, curses.A_REVERSE)
+        win.addstr(win.getmaxyx()[0]-1, 0, msg, curses.A_REVERSE)
 
     class Button:
         def __init__(self, _win, y, x, txt, _ret=None):
@@ -424,8 +424,19 @@ class Bugl:
         p_g_select = SafeWinWrapper(curses.newpad(300, int(maxx/2)-1))
         p_g_details = SafeWinWrapper(curses.newpad(300, int(maxx/2)-1))
         if not self._games:
-            self.dialog(scr, f"No games found",
-                        f"No games found under the game library path ({self.conf.get('games_folder')})")
+            if self.dialog(scr, f"No games found",
+                           f"No games found under the game library path ({self.conf.get('games_folder')}).\n"
+                           f"Download them now?", "confirm", butts=("Yes", "No")):
+                self.render_loading(scr, "Connecting")
+                if self._init_sync(scr):
+                    _s = self.sync.download_a("games")
+                    self.dialog(scr, "Download Complete", "Downloaded successful for all the games found on remote.",
+                                "alert")
+                    if _s:
+                        self.dialog(scr, "Restart Needed", f"Synchronized {len(_s)} games, a restart is needed.")
+                        return -1
+                    else:
+                        self.dialog(scr, "No games found", f"No games found on remote.")
         if self.sync_c.get("host") is None and not self.conf.get("ignore_missing_host"):
             if self.dialog(scr, f"No host set",
                            f"Warning: no remote host set for synchronization, set it in the sync.json file "
@@ -500,34 +511,6 @@ class Bugl:
             elif inp == curses.KEY_ENTER or inp == ord("\n"):
                 if self._selected:
                     self._selected.run()
-                """
-                while True:
-                    if not bugl.g().is_alive():
-                        scr.addstr(1, 0, f"{bugl.g().d_name} exited.")
-                        break
-                    sleep(1)
-                if bugl.g().poll() != 0:
-                    scr.erase()
-                    with open(bugl.g().conf.get("stderr")) as _e:
-                        max_len = maxy - 1
-                        lines = []
-                        for i in _e.readlines():
-                            lines.append(i)
-                            if len(lines) > max_len:
-                                lines.pop(0)
-                    scr.addstr(0, 0, f"An error occurred while launching {bugl.g().d_name}"
-                     "(showing the last {len(lines)} line/s):")
-                    scr.refresh()
-                    for _ln, _l in enumerate(lines):
-                        scr.addstr(_ln + 1, 0, _l[:maxx])
-                    scr.refresh()
-                    scr.getch()
-                    scr.erase()
-                scr.addstr(maxy, 0, "Press any key to continue...")
-                scr.refresh()
-                sleep(1)
-                scr.getch()
-                """
             elif inp == curses.KEY_EXIT or inp == ord("q"):
                 if self.dialog(scr, "Quit", "Are you sure you want to quit?", "confirm"):
                     if not self.sync or not self.sync.sftp:
@@ -537,7 +520,7 @@ class Bugl:
                             if self._init_sync(scr):
                                 self.render_loading(scr, "Syncing")
                                 self.write(sync=True)
-                    return
+                    return 0
                 else:
                     scr.erase()
                     continue
@@ -564,7 +547,7 @@ class Bugl:
                 scr.erase()
 
 
-if __name__ == "__main__":
+def prepare():
     try:
         from bugl.templates import bugl_defaults
         from bugl.templates import sync_defaults
@@ -573,14 +556,14 @@ if __name__ == "__main__":
         from templates import sync_defaults
 
     if os.name == "nt":
-        CONFIGS = "~/Documents/bugl/"
+        conf = "~/Documents/bugl/"
     else:
-        CONFIGS = "~/.config/bugl/"
-    CONFIGS = os.path.expanduser(CONFIGS)
+        conf = "~/.config/bugl/"
+    conf = os.path.expanduser(conf)
 
-    prepare_path(CONFIGS)
-    os.chdir(CONFIGS)
-    if not os.path.exists(CONFIGS+"config.json"):
+    prepare_path(conf)
+    os.chdir(conf)
+    if not os.path.exists(conf + "config.json"):
         prepare_path("config.json")
         g_conf = Configs(bugl_defaults, config_path="config.json", write=True)
         g_conf.write("config.json")
@@ -594,15 +577,22 @@ if __name__ == "__main__":
     else:
         s_conf = Configs(sync_defaults, config_path="sync.json")
 
-    if g_conf.get("signature") == "":
-        g_conf.set("signature", s_conf.get("signature"))
-    bugl = Bugl(g_conf, s_conf)
-    prepare_path(bugl.conf.get("games_folder"), _folder=True)
+    _b = Bugl(g_conf, s_conf)
+    prepare_path(_b.conf.get("games_folder"), _folder=True)
     for _c in os.listdir("games"):
         if _c.split(".")[-1] == "json":
-            bugl.add_game(f"games/{_c}")
+            _b.add_game(f"games/{_c}")
+    return _b
 
-    try:
-        curses.wrapper(lambda l: bugl.gui(SafeWinWrapper(l)))
-    finally:
-        bugl.write()
+
+if __name__ == "__main__":
+    while True:
+        bugl = prepare()
+        try:
+            r = curses.wrapper(lambda l: bugl.gui(SafeWinWrapper(l)))
+            if r != -1:
+                bugl.write()
+                exit()
+            del bugl
+        except KeyboardInterrupt:
+            bugl.write()
