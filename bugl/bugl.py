@@ -176,7 +176,10 @@ class Bugl:
         self.dialog(scr, title, "Loading...", _type="blank")
 
     def add_game(self, _config_path):
-        self._games.append(Game(Configs(self.game_defaults, config_path=_config_path), self))
+        try:
+            self._games.append(Game(Configs(self.game_defaults, config_path=_config_path), self))
+        except Configs.ConfigFormatErrorException:
+            return _config_path
 
     def index(self, _g: Game):
         if type(_g) is not Game:
@@ -207,12 +210,20 @@ class Bugl:
             else:
                 raise ValueError
 
-    def sync_conf(self, conf: Configs, callback=None, win=None):
+    def sync_conf(self, conf: Configs, callback=None, win=None, force_pull=False, force_push=False):
         conf.write()
 
         def mtime(path):
             return datetime.fromtimestamp(os.stat(path).st_mtime), \
                    datetime.fromtimestamp(self.sync.sftp.stat(path).st_mtime)
+
+        if force_pull and force_push:
+            raise TypeError("You can only force one action")
+
+        if force_pull:
+            self.sync.download(conf.config_path, callback=callback)
+        if force_push:
+            self.sync.upload(conf.config_path, callback=callback)
 
         if self.sync.exists(conf.config_path):
             if self.sync.hash_compare(conf.config_path):
@@ -417,12 +428,26 @@ class Bugl:
                         sel += 1
         diag.erase()
 
-    def gui(self, scr: SafeWinWrapper):
+    def gui(self, scr: SafeWinWrapper, faulty_confs):
         maxy, maxx = scr.getmaxyx()
         scr.timeout(500)
         curses.curs_set(False)
         p_g_select = SafeWinWrapper(curses.newpad(300, int(maxx/2)-1))
         p_g_details = SafeWinWrapper(curses.newpad(300, int(maxx/2)-1))
+        for f in faulty_confs:
+            if self.dialog(scr, f"Config loading error",
+                           f"The config at path {f} have an error, download this file from remote?",
+                           "confirm", butts=("Yes", "No")):
+                self.render_loading(scr, "Connecting")
+                if self._init_sync(scr):
+                    try:
+                        _r = RConfigs(self.sync, self.game_defaults, f)
+                        _r.write_local()
+                        self.add_game(f)
+                    except Configs.ConfigFormatErrorException:
+                        self.dialog(scr, "Download Failed", f"Even the remote file contains errors.\n"
+                                                            f"Please manually check {f}.")
+
         if not self._games:
             if self.dialog(scr, f"No games found",
                            f"No games found under the game library path ({self.conf.get('games_folder')}).\n"
@@ -579,17 +604,18 @@ def prepare():
 
     _b = Bugl(g_conf, s_conf)
     prepare_path(_b.conf.get("games_folder"), _folder=True)
+    _errs = []
     for _c in os.listdir("games"):
         if _c.split(".")[-1] == "json":
-            _b.add_game(f"games/{_c}")
-    return _b
+            _errs.append(_b.add_game(f"games/{_c}"))
+    return _b, [_i for _i in _errs if _i]
 
 
 if __name__ == "__main__":
     while True:
-        bugl = prepare()
+        bugl, errs = prepare()
         try:
-            r = curses.wrapper(lambda l: bugl.gui(SafeWinWrapper(l)))
+            r = curses.wrapper(lambda l: bugl.gui(SafeWinWrapper(l), errs))
             if r != -1:
                 bugl.write()
                 exit()

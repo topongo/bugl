@@ -20,7 +20,7 @@ class Sync:
         self.ssh.set_missing_host_key_policy(AutoAddPolicy())
         self.sftp = None
         if self.conf.get("remote_path")[-1] != "/":
-            self.conf.set("remote_path", self.conf.get("remote_path")+"/")
+            self.conf.set("remote_path", self.conf.get("remote_path") + "/")
             self.conf.write()
         if self.conf.get("mode") not in (self.PKEY, self.PWD):
             raise TypeError("Invalid mode in sync config file")
@@ -44,6 +44,10 @@ class Sync:
             except ssh_exception.SSHException:
                 self.ssh.close()
                 self.connected = False
+
+    def ready(self):
+        self._update_status()
+        return self.connected
 
     def _authenticate(self, custom_pwd=None):
         if self.conf.get("mode") == self.PWD:
@@ -214,10 +218,45 @@ class Sync:
 
 
 class RConfigs(Configs):
-    def __init__(self, parent, template, config_path=None):
-        self.parent = parent
-        if self.parent.exists(config_path):
-            d = json.load(self.parent.sftp.open(config_path))
+    LOCAL = 0
+    REMOTE = 0
+
+    def __init__(self, sync: Sync, template, config_path=None, load_from=REMOTE):
+        self.sync = sync
+        self.ex_loc = os.path.exists(config_path)
+        self.ex_rem = sync.exists(config_path)
+        if load_from == self.LOCAL:
+            if self.ex_loc:
+                Configs.__init__(self, template, config_path=config_path)
+            else:
+                raise FileNotFoundError
+        elif load_from == self.REMOTE:
+            if self.ex_rem:
+                try:
+                    d = json.load(self.sync.sftp.open(config_path))
+                    Configs.__init__(self, template, data=d, config_path=config_path)
+                except json.decoder.JSONDecodeError:
+                    raise self.ConfigFormatErrorException
+            else:
+                raise FileNotFoundError
         else:
-            raise FileNotFoundError
-        Configs.__init__(self, template, data=d, config_path=config_path)
+            raise TypeError("parameter load_from can only be RConfigs.LOCAL or RConfigs.REMOTE")
+
+    def compare(self):
+        if self.ex_rem and self.ex_loc:
+            return False
+
+        with open(self.config_path) as l, self.sync.sftp.open(self.config_path) as r:
+            while True:
+                l_b, r_b = l.read(1024), r.read(1024)
+                if l_b != r_b:
+                    return False
+                elif l_b == b"":
+                    break
+
+    def write_remote(self):
+        with self.sync.sftp.open(self.config_path, "w+") as r:
+            self.write(r)
+
+    def write_local(self):
+        self.write()
