@@ -284,14 +284,21 @@ class Bugl:
                 if win:
                     self.dialog(win, "No sync required", "Files are identical")
                 return
-
             else:
-                l_mtime, r_mtime = mtime(conf.config_path)
-                if l_mtime > r_mtime:
-                    # local file is newer, upload
-                    self.sync.upload(conf.config_path, callback=callback)
-                elif l_mtime < r_mtime:
-                    self.sync.download(conf.config_path, callback=callback)
+                r_conf = RConfigs(self.sync, self.game_defaults, conf.config_path)
+                try:
+                    if r_conf.get("__update_time__") > conf.get("__update_time__"):
+                        self.sync.download(conf.config_path, callback=callback)
+                    else:
+                        self.sync.upload(conf.config_path, callback=callback)
+                except KeyError:
+                    self.dialog(win, "Sync Config", "Warning: remote data has no __update_time__ property.\n")
+                    l_mtime, r_mtime = mtime(conf.config_path)
+                    if l_mtime > r_mtime:
+                        # local file is newer, upload
+                        self.sync.upload(conf.config_path, callback=callback)
+                    elif l_mtime < r_mtime:
+                        self.sync.download(conf.config_path, callback=callback)
         else:
             # file not found on remote, upload
             self.sync.upload(conf.config_path, callback=callback)

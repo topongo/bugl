@@ -1,5 +1,6 @@
 import os
 import json
+import socket
 from subprocess import Popen, PIPE, STDOUT, DEVNULL
 from paramiko import SSHClient, RSAKey, AutoAddPolicy, ssh_exception
 from TopongoConfigs.configs import Configs
@@ -136,7 +137,7 @@ class Sync:
                     raise e
             except ssh_exception.AuthenticationException:
                 raise self.AuthError("Invalid password")
-            except ssh_exception.SSHException as e_:
+            except (ssh_exception.SSHException, socket.gaierror) as e_:
                 raise self.ConnectionError(e_)
             self.sftp = self.ssh.open_sftp()
             self.prepare_path(self.conf.get("remote_path"))
