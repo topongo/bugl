@@ -1,9 +1,12 @@
 import os
 import json
+from subprocess import Popen, PIPE, STDOUT, DEVNULL
 from paramiko import SSHClient, RSAKey, AutoAddPolicy, ssh_exception
 from TopongoConfigs.configs import Configs
 from hashlib import sha256
 from stat import S_ISDIR
+from threading import Thread
+from time import sleep
 
 
 class Sync:
@@ -214,7 +217,8 @@ class Sync:
         return self.r_checksum(l_path if not r_path else r_path) == _s.hexdigest()
 
     def exists(self, path):
-        return os.path.basename(path) in self.sftp.listdir(os.path.dirname(path))
+        return os.path.basename(path) in self.sftp.listdir(
+            os.path.dirname(path.replace("~", f"/home/{self.conf.get('user')}")))
 
 
 class RConfigs(Configs):
@@ -260,3 +264,141 @@ class RConfigs(Configs):
 
     def write_local(self):
         self.write()
+
+
+class Rsync:
+    class Transfer:
+        def __init__(self, cmd, files, t):
+            self.cmd = cmd
+            self.files = files
+            self.proc = None
+            self.progress = 0
+            self.count = -1
+            self.tot_bytes = 0
+            self.size = 0
+            self.type = t
+            self.speed = "N/A"
+            self.eta = "N/A"
+
+        def commit(self):
+            self.proc = Popen(self.cmd, stdout=PIPE, stderr=STDOUT)
+            stop = 10
+            rem = ""
+            while stop:
+                data = self.proc.stdout.readline(128).decode()
+                if "\r" not in data:
+                    lines = [data]
+                else:
+                    data = rem + data
+                    lines = data.split("\r")
+                    rem = lines[-1]
+                    lines = lines[:-1]
+                for li in lines:
+                    li = li.strip()
+                    if li == '':
+                        stop -= 1
+                    if "B/s" in li:
+                        tot_bytes, perc, speed, eta = li.split()
+                        self.tot_bytes = int(tot_bytes.replace(",", ""))
+                        self.progress = float(perc.replace("%", "")) / 100
+                        self.speed = speed
+                        self.eta = eta
+                    elif li.strip() in self.files:
+                        self.count += 1
+                sleep(.5)
+            print()
+
+    class GenericError(Exception):
+        pass
+
+    def __init__(self, sync: Sync, switches="PrlptgEovu", s_extra="", s_exclude=""):
+        self.sync = sync
+        # P: --partial and --progress
+        # h: human-readable
+        # r: recursive
+        # l: links
+        # p: preserve permissions
+        # t: preserve times
+        # g: preserve groups
+        # o: preserve owner
+        # E: preserve execution
+        # v: verbose
+        # u: update: keep newer files
+        self.switches = switches + s_extra
+        for i in s_exclude:
+            self.switches.replace(i, "")
+        self.proc = None
+        self.pending = []
+        self.running = False
+        self.job = None
+
+    def command_gen(self, dry=False):
+        return ["rsync", f"-{self.switches}" + ("n" if dry else ""), "-e", f"ssh -p {self.sync.conf.get('port')}"]
+
+    def gen_remote(self, path):
+        return f"{self.sync.conf.get('user')}@{self.sync.conf.get('host')}:{path}"
+
+    def gen_job(self, local, remote, uniq):
+        """
+        Returns a pair of integers, for pull and push status:
+         0: OK
+        -1: Error on sender
+        -2: Error on receiver
+
+        :param local:
+        :param remote:
+        :param uniq:
+        :return:
+        """
+        local = os.path.expanduser(local)
+        remote = os.path.join(self.gen_remote(remote).replace("~", f"/home/{self.sync.conf.get('user')}"), uniq)
+        cmd_pull = lambda l: self.command_gen(dry=l) + [remote, local]
+        cmd_push = lambda l: self.command_gen(dry=l) + [local, remote]
+        proc_pull = Popen(cmd_pull(True), stdout=PIPE, stderr=STDOUT, stdin=DEVNULL)
+        proc_push = Popen(cmd_push(True), stdout=PIPE, stderr=STDOUT, stdin=DEVNULL)
+        ret = {}
+        for proc, cmd, name in zip((proc_pull, proc_push), (cmd_pull, cmd_push), ("Pull", "Push")):
+            output = proc.communicate()[0].decode()
+            if proc.poll():
+                for li in output.split("\n"):
+                    if "failed" in li:
+                        if "[Receiver]" in li:
+                            target = "receiver"
+                        elif "[sender]" in li:
+                            target = "sender"
+                        else:
+                            target = "unknown"
+                        if "No such file or directory" in output:
+                            ret[proc] = -1 if target == "sender" else -2
+                if proc not in ret:
+                    ret[proc] = -100
+            else:
+                files = []
+
+                start = False
+                for ln_ in output.split("\n"):
+                    if start:
+                        if "created directory" in ln_:
+                            continue
+                        if ln_ == "":
+                            break
+                        files.append(ln_)
+                    else:
+                        if "sending incremental file list" in ln_:
+                            start = True
+
+                if files:
+                    self.pending.append(Rsync.Transfer(cmd(False), files, name))
+                ret[proc] = 0
+        return ret[proc_pull], ret[proc_push]
+
+    def commit(self):
+        def th():
+            self.running = True
+            while len(self.pending):
+                self.job = self.pending.pop(0)
+                self.job.commit()
+            self.running = False
+
+        t = Thread(target=th, daemon=True)
+        t.start()

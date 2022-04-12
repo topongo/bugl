@@ -5,7 +5,9 @@ import os
 from datetime import datetime, timedelta
 from TopongoConfigs.configs import Configs
 from sww import SafeWinWrapper
-from sync import Sync, RConfigs
+from sync import Sync, RConfigs, Rsync
+from uuid import uuid4
+from itertools import chain
 
 
 def prepare_path(_f, _c_f=False, _folder=False):
@@ -47,20 +49,41 @@ class Game:
         self._proc = None
         self._session_started = False
         self._init_playtime = self.conf.get("playtime")
+        self.args = None
+        self.rsync = None
+        self.syncing = False
         prepare_path(self.conf.get("stdout"))
         prepare_path(self.conf.get("stderr"))
+        # if some of its datapaths contains a numeric or empty key assign an uuid to the datapath
+        deltas = {}
+        for k, i in self.conf.get("data").items():
+            try:
+                int(k)
+            except ValueError:
+                if k != "":
+                    continue
+            deltas[k] = str(uuid4())
+        if deltas:
+            tmp = self.conf.get("data")
+            for old, new in deltas.items():
+                tmp[new] = tmp.pop(old)
+            self.conf.set("data", tmp)
 
     def run(self):
-        args = [self.conf.get("exec"), self.conf.get("exec_path")] + self.conf.get("exec_args")
+        self.args = [self.conf.get("exec"), self.conf.get("exec_path")] + self.conf.get("exec_args")
         self.conf.set("latest_launch", datetime.now().timestamp())
         self.conf.game_conf.write()
         self._session_started = True
         for _i in ("stdout", "stderr"):
             prepare_path(self.conf.get(_i))
-        self._proc = subprocess.Popen(args,
+        if self.conf.get("exec_in_path"):
+            cwd = {"cwd": os.path.dirname(self.conf.get("exec_path"))}
+        else:
+            cwd = {}
+        self._proc = subprocess.Popen(self.args,
                                       stdout=open(self.conf.get("stdout", path=True), "w+"),
                                       stderr=open(self.conf.get("stderr", path=True), "w+"),
-                                      stdin=subprocess.DEVNULL)
+                                      stdin=subprocess.DEVNULL, **cwd)
 
     def name(self):
         return self.conf.get("name") + (" (Running)" if self.is_alive() else "")
@@ -74,7 +97,7 @@ class Game:
         else:
             return self._proc.poll()
 
-    def update_playtime(self):
+    def tick(self):
         if self._session_started:
             t_e = datetime.now() - datetime.fromtimestamp(self.conf.get("latest_launch"))
             self.conf.set("playtime", self._init_playtime + t_e.total_seconds())
@@ -82,6 +105,9 @@ class Game:
             if not self.is_alive():
                 self._session_started = False
                 self._init_playtime = self.conf.get("playtime")
+                # if process exited with a non-zero code return true
+                if self.poll() != 0:
+                    return True
 
     def wait(self):
         self._proc.wait()
@@ -134,6 +160,16 @@ class Game:
         yield "Last Played", _l_l_o
         yield "Time Played", time_elapsed(timedelta(seconds=self.conf.get("playtime")), "0 secs")
 
+    def sync_data(self):
+        if not self.rsync.running:
+            self.rsync.commit()
+
+    def sync_status(self):
+        if self.rsync.running:
+            return self.rsync.job.progress
+        else:
+            return "Not running"
+
 
 class Bugl:
     VERSION = 0.2
@@ -146,6 +182,7 @@ class Bugl:
         self.conf = conf
         self.sync_c = sync_conf
         self.sync = None
+        self.rsync = None
         self.game_defaults = Game.GameConfig(_c_d, self.conf).game_conf
         self._games = []
         self._selected = None
@@ -159,19 +196,23 @@ class Bugl:
             try:
                 self.sync.connect()
             except self.DialogCancel:
-                return False
+                return
             except Sync.AuthError:
                 scr.erase()
                 self.dialog(scr, "Connection Error",
                             "Authentication error, the password you entered is wrong or invalid.")
-                return False
+                return
             except Sync.NoHostSet:
                 scr.erase()
                 self.dialog(scr, "Connection Error",
                             f"No host set in config file ({os.path.abspath(self.sync.conf.config_path)})")
-                return False
+                return
 
         return True
+
+    def gen_rsync(self, scr):
+        self.sync.prepare_path(self.sync.conf.get("remote_data_path"))
+        return Rsync(self.sync)
 
     def render_loading(self, scr, title):
         self.dialog(scr, title, "Loading...", _type="blank")
@@ -179,8 +220,10 @@ class Bugl:
     def add_game(self, _config_path):
         try:
             self._games.append(Game(Configs(self.game_defaults, config_path=_config_path), self))
-        except Configs.ConfigFormatErrorException:
-            return _config_path
+            return _config_path, None
+        except Configs.ConfigFormatErrorException as e:
+            # raise e
+            return _config_path, e
 
     def index(self, _g: Game):
         if type(_g) is not Game:
@@ -246,6 +289,37 @@ class Bugl:
             # file not found on remote, upload
             self.sync.upload(conf.config_path, callback=callback)
 
+    def sync_data(self, g: Game, win):
+        if self._init_sync(win):
+            rem = f"{self.sync.conf.get('remote_data_path')}{g.conf.get('id')}/"
+            if win:
+                self.render_loading(win, "Starting transaction")
+            g.rsync = self.gen_rsync(win)
+            for uniq, loc in g.conf.get("data").items():
+                loc = os.path.expanduser(loc)
+                if not os.path.exists(loc):
+                    self.dialog(win, "Sync Data", f"warning: path {loc} does not exists on disk.")
+                else:
+                    if os.path.isdir(loc) and not os.path.islink(loc) and loc[-1] != "/":
+                        loc += "/"
+                ll, sh = g.rsync.gen_job(loc, rem, uniq)
+                if ll == -1:
+                    if not self.dialog(win, "Sync Data",
+                                       f"Data folder corresponding to \n{loc}\ndoesn't exists on remote,"
+                                       f" upload it?", "confirm",
+                                       butts=("Yes", "No")):
+                        return
+            if g.rsync.pending:
+                changed = "\"" + "\"; \"".join(chain(*map(lambda l: l.files, g.rsync.pending))) + "\""
+                self.dialog(win, "Sync Data", f"Files which receives changes:\n\"{changed}")
+                g.sync_data()
+            else:
+                self.dialog(win, "Sync Data", f"No data to be synced.")
+        else:
+            self.dialog(win, "Sync Data", "Can't sync data without connection with remote.")
+        while True:
+            self.render_loading(win, f"{g.rsync.job.progress}")
+
     def write(self, sync=False):
         self.conf.write()
         for _g in self._games:
@@ -284,6 +358,9 @@ class Bugl:
         }[_section]
         msg += (" " * (win.getmaxyx()[1] - 1 - len(msg)))
         win.addstr(win.getmaxyx()[0]-1, 0, msg, curses.A_REVERSE)
+
+    def render_progress(self, win: SafeWinWrapper, _game):
+
 
     class Button:
         def __init__(self, _win, y, x, txt, _ret=None):
@@ -435,19 +512,19 @@ class Bugl:
         curses.curs_set(False)
         p_g_select = SafeWinWrapper(curses.newpad(300, int(maxx/2)-1))
         p_g_details = SafeWinWrapper(curses.newpad(300, int(maxx/2)-1))
-        for f in faulty_confs:
+        for path_, ex_ in faulty_confs.items():
             if self.dialog(scr, f"Config loading error",
-                           f"The config at path {f} have an error, download this file from remote?",
+                           f"The config at path {path_} have an error:\nDownload this file from remote?",
                            "confirm", butts=("Yes", "No")):
                 self.render_loading(scr, "Connecting")
                 if self._init_sync(scr):
                     try:
-                        _r = RConfigs(self.sync, self.game_defaults, f)
+                        _r = RConfigs(self.sync, self.game_defaults, path_)
                         _r.write_local()
-                        self.add_game(f)
+                        self.add_game(path_)
                     except Configs.ConfigFormatErrorException:
                         self.dialog(scr, "Download Failed", f"Even the remote file contains errors.\n"
-                                                            f"Please manually check {f}.")
+                                                            f"Please manually check {path_}.")
 
         if not self._games:
             if self.dialog(scr, f"No games found",
@@ -479,7 +556,11 @@ class Bugl:
         while True:
             maxy, maxx = scr.getmaxyx()
             if self._selected:
-                self._selected.update_playtime()
+                if self._selected.tick():
+                    with open(self._selected.conf.get("stderr", path=True)) as e:
+                        self.dialog(scr, f'{self._selected.conf.get("name")} errored.',
+                                    f'{self._selected.conf.get("name")} exited with code {self._selected.poll()}.\n'
+                                    f'Error log:\n{" ".join(self._selected.args)}')
             p_g_details.refresh_defaults(0,
                                          0,
                                          0,
@@ -550,7 +631,7 @@ class Bugl:
                 else:
                     scr.erase()
                     continue
-            elif inp == curses.KEY_EXIT or inp == ord("s"):
+            elif inp == ord("s"):
                 self.render_loading(scr, "Connecting")
                 if self._init_sync(scr):
                     self.render_loading(scr, "Syncing")
@@ -560,6 +641,10 @@ class Bugl:
                         self._sync_all()
                     curses.napms(1000)
                 scr.erase()
+            elif inp == ord("t"):
+                # put tests here
+                self.render_loading(scr, "Generating rsync object")
+                self.sync_data(self._selected, scr)
             elif inp == curses.KEY_RESIZE:
                 maxy, maxx = scr.getmaxyx()
                 p_g_select.resize(300, int(maxx/2))
@@ -605,11 +690,12 @@ def prepare():
 
     _b = Bugl(g_conf, s_conf)
     prepare_path(_b.conf.get("games_folder"), _folder=True)
-    _errs = []
+    _errs = {}
     for _c in os.listdir("games"):
         if _c.split(".")[-1] == "json":
-            _errs.append(_b.add_game(f"games/{_c}"))
-    return _b, [_i for _i in _errs if _i]
+            _path, _ex = _b.add_game(f"games/{_c}")
+            _errs[_path] = _ex
+    return _b, {_p: _e for _p, _e in _errs.items() if _e}
 
 
 if __name__ == "__main__":

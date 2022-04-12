@@ -12,9 +12,11 @@ game_defaults = {
     "name": "",
     "exec": "",
     "exec_path": "",
+    "exec_in_path": False,
     "exec_args": [],
     "latest_launch": -1.0,
-    "playtime": 0.0
+    "playtime": 0.0,
+    "data": [str]
 }
 
 game_shared = (
@@ -28,5 +30,6 @@ sync_defaults = {
     "port": 22,
     "private_key_path": None,
     "mode": Sync.PWD,
-    "remote_path": "~/.config/bugl/"
+    "remote_path": "~/.config/bugl/",
+    "remote_data_path": "~/data/bugl/data/"
 }

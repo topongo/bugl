@@ -31,12 +31,16 @@ class SafeWinWrapper:
             _process = []
             rows = []
             for _w in _str.split(" "):
+                if len(_w) == 0:
+                    continue
                 if "\n" in _w:
                     _process += [("" if n == 0 else "\n")+i for n, i in enumerate(_w.split("\n"))]
                 else:
                     _process.append(_w)
 
             for _w in _process:
+                if len(_w) == 0:
+                    continue
                 if _w[0] == "\n":
                     rows.append(_buff)
                     _buff = ""
@@ -50,6 +54,8 @@ class SafeWinWrapper:
                     _buff += _w + " "
             rows.append(_buff)
             for _n, _i in enumerate(rows):
+                if _n == _my - 1:
+                    break
                 self.win.addstr(_y + _n, _x if k_align else 0, _i, _attr)
 
         elif _mode == "cut":
