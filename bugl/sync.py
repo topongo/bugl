@@ -9,6 +9,10 @@ from threading import Thread
 from time import sleep
 
 
+LOCAL = 0
+REMOTE = 1
+
+
 class Sync:
     PWD = 0
     PKEY = 1
@@ -16,10 +20,17 @@ class Sync:
     class AuthError(Exception):
         pass
 
+    class NoHostSet(Exception):
+        pass
+
+    class ConnectionError(Exception):
+        pass
+
     def __init__(self, _conf, _password_mtd=None, _full_init=False):
         self.conf = _conf
         self.ssh = SSHClient()
         self.pwd_mtd = _password_mtd
+        self.home = None
         self.ssh.set_missing_host_key_policy(AutoAddPolicy())
         self.sftp = None
         if self.conf.get("remote_path")[-1] != "/":
@@ -73,23 +84,26 @@ class Sync:
                 if self.pwd_mtd is None:
                     raise self.AuthError("No method supplied for password retrieving")
 
-    def prepare_path(self, path):
+    def expanduser(self, _path):
+        if self.home is None:
+            _, stdout, _ = self.ssh.exec_command("echo -n ~")
+            self.home = stdout.read().decode()
+        return self.home
+
+    def prepare_path(self, path_):
         created = []
-        path = path.replace("~", f"/home/{self.conf.get('user')}")
+        path_ = path_.replace("~", f"/home/{self.conf.get('user')}")
         try:
-            self.sftp.stat(path)
+            self.sftp.stat(path_)
         except IOError:
             try:
-                self.sftp.mkdir(path)
-                created.append(path)
+                self.sftp.mkdir(path_)
+                created.append(path_)
             except IOError:
-                self.prepare_path(os.path.abspath(os.path.join(path, os.path.pardir)))
-                self.sftp.mkdir(path)
-                created.append(path)
+                self.prepare_path(os.path.abspath(os.path.join(path_, os.path.pardir)))
+                self.sftp.mkdir(path_)
+                created.append(path_)
         return created
-
-    class NoHostSet(Exception):
-        pass
 
     def connect(self, custom_pwd=None):
         # if auth method is pwd, ask for it
@@ -122,6 +136,8 @@ class Sync:
                     raise e
             except ssh_exception.AuthenticationException:
                 raise self.AuthError("Invalid password")
+            except ssh_exception.SSHException as e_:
+                raise self.ConnectionError(e_)
             self.sftp = self.ssh.open_sftp()
             self.prepare_path(self.conf.get("remote_path"))
             self.sftp.chdir(self.conf.get("remote_path").replace("~", f"/home/{self.conf.get('user')}"))
@@ -133,17 +149,17 @@ class Sync:
         self.ssh.close()
         self._update_status()
 
-    def r_walk(self, path):
+    def r_walk(self, path_):
         files = []
         folders = []
-        for f in self.sftp.listdir_attr(path):
+        for f in self.sftp.listdir_attr(path_):
             if S_ISDIR(f.st_mode):
                 folders.append(f.filename)
             else:
                 files.append(f.filename)
-        yield path, folders, files
+        yield path_, folders, files
         for folder in folders:
-            new_path = os.path.join(path, folder)
+            new_path = path_.join(path_, folder)
             for _i in self.r_walk(new_path):
                 yield _i
 
@@ -194,11 +210,11 @@ class Sync:
                         raise FileExistsError(f"{os.path.join(_p, _dd)} exists locally")
         return created
 
-    def r_checksum(self, path):
-        if os.path.basename(path) not in self.sftp.listdir(os.path.dirname(path)):
-            raise FileNotFoundError(f"Can't find {path} on remote")
+    def r_checksum(self, path_):
+        if os.path.basename(path_) not in self.sftp.listdir(os.path.dirname(path_)):
+            raise FileNotFoundError(f"Can't find {path_} on remote")
         _s = sha256()
-        with self.sftp.open(path) as _f:
+        with self.sftp.open(path_) as _f:
             while True:
                 _b = _f.read(1024)
                 if _b == b"":
@@ -217,24 +233,24 @@ class Sync:
         return self.r_checksum(l_path if not r_path else r_path) == _s.hexdigest()
 
     def exists(self, path):
-        return os.path.basename(path) in self.sftp.listdir(
-            os.path.dirname(path.replace("~", f"/home/{self.conf.get('user')}")))
+        try:
+            return os.path.basename(path) in self.sftp.listdir(
+                os.path.dirname(path.replace("~", f"/home/{self.conf.get('user')}")))
+        except FileNotFoundError:
+            return False
 
 
 class RConfigs(Configs):
-    LOCAL = 0
-    REMOTE = 0
-
     def __init__(self, sync: Sync, template, config_path=None, load_from=REMOTE):
         self.sync = sync
         self.ex_loc = os.path.exists(config_path)
         self.ex_rem = sync.exists(config_path)
-        if load_from == self.LOCAL:
+        if load_from == LOCAL:
             if self.ex_loc:
                 Configs.__init__(self, template, config_path=config_path)
             else:
                 raise FileNotFoundError
-        elif load_from == self.REMOTE:
+        elif load_from == REMOTE:
             if self.ex_rem:
                 try:
                     d = json.load(self.sync.sftp.open(config_path))

@@ -207,6 +207,10 @@ class Bugl:
                 self.dialog(scr, "Connection Error",
                             f"No host set in config file ({os.path.abspath(self.sync.conf.config_path)})")
                 return
+            except Sync.ConnectionError as _e:
+                scr.erase()
+                self.dialog(scr, "Connection Error", _e.args[0])
+                return
 
         return True
 
@@ -251,6 +255,9 @@ class Bugl:
                 self._selected = self._games[-1]
             elif _i == "first":
                 self._selected = self._games[0]
+            elif _i == "last_played":
+                if self._games:
+                    self._selected = max(self._games, key=lambda l: l.conf.get("latest_launch"))
             else:
                 raise ValueError
 
@@ -313,12 +320,14 @@ class Bugl:
                 changed = "\"" + "\"; \"".join(chain(*map(lambda l: l.files, g.rsync.pending))) + "\""
                 self.dialog(win, "Sync Data", f"Files which receives changes:\n\"{changed}")
                 g.sync_data()
+
+                while True:
+                    self.render_loading(win, f"{g.rsync.job.progress}")
             else:
                 self.dialog(win, "Sync Data", f"No data to be synced.")
+
         else:
             self.dialog(win, "Sync Data", "Can't sync data without connection with remote.")
-        while True:
-            self.render_loading(win, f"{g.rsync.job.progress}")
 
     def write(self, sync=False):
         self.conf.write()
@@ -360,7 +369,7 @@ class Bugl:
         win.addstr(win.getmaxyx()[0]-1, 0, msg, curses.A_REVERSE)
 
     def render_progress(self, win: SafeWinWrapper, _game):
-
+        pass
 
     class Button:
         def __init__(self, _win, y, x, txt, _ret=None):
@@ -548,7 +557,7 @@ class Bugl:
                            "confirm", _placeholder=1, butts=("Yes", "No")):
                 self.conf.set("ignore_missing_host", True)
                 self.write()
-        self.select(0)
+        self.select("last_played")
         scr.erase()
         scr.refresh()
         # synced = False
@@ -689,7 +698,7 @@ def prepare():
         s_conf = Configs(sync_defaults, config_path="sync.json")
 
     _b = Bugl(g_conf, s_conf)
-    prepare_path(_b.conf.get("games_folder"), _folder=True)
+    prepare_path("games", _folder=True)
     _errs = {}
     for _c in os.listdir("games"):
         if _c.split(".")[-1] == "json":
@@ -706,6 +715,6 @@ if __name__ == "__main__":
             if r != -1:
                 bugl.write()
                 exit()
-            del bugl
         except KeyboardInterrupt:
             bugl.write()
+            exit()

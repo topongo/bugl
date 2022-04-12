@@ -16,7 +16,7 @@ game_defaults = {
     "exec_args": [],
     "latest_launch": -1.0,
     "playtime": 0.0,
-    "data": [str]
+    "data": {}
 }
 
 game_shared = (
