@@ -8,6 +8,7 @@ from sww import SafeWinWrapper
 from sync import Sync, RConfigs, Rsync
 from uuid import uuid4
 from itertools import chain
+from time import sleep
 
 
 def prepare_path(_f, _c_f=False, _folder=False):
@@ -187,6 +188,7 @@ class Bugl:
         self._games = []
         self._selected = None
         self._section = "main"
+        self._progress = True
 
     def _init_sync(self, scr):
         if not self.sync:
@@ -292,7 +294,11 @@ class Bugl:
                     else:
                         self.sync.upload(conf.config_path, callback=callback)
                 except KeyError:
-                    self.dialog(win, "Sync Config", "Warning: remote data has no __update_time__ property.\n")
+                    if self.dialog(win, "Sync Config",
+                                   "Warning: remote data has no __update_time__ property.\n"
+                                   "Probably it's an older version, upload local to remote?",
+                                   "confirm"):
+                        self.sync.upload(conf.config_path, callback=callback)
                     l_mtime, r_mtime = mtime(conf.config_path)
                     if l_mtime > r_mtime:
                         # local file is newer, upload
@@ -328,8 +334,11 @@ class Bugl:
                 self.dialog(win, "Sync Data", f"Files which receives changes:\n\"{changed}")
                 g.sync_data()
 
+                """
+                prog = self.dialog(win, "Uploading using rsync...", "Preparing...", "progress")
                 while True:
-                    self.render_loading(win, f"{g.rsync.job.progress}")
+                    prog.update(g.rsync.job.progress, 1.0)
+                    sleep(1)"""
             else:
                 self.dialog(win, "Sync Data", f"No data to be synced.")
 
@@ -375,8 +384,39 @@ class Bugl:
         msg += (" " * (win.getmaxyx()[1] - 1 - len(msg)))
         win.addstr(win.getmaxyx()[0]-1, 0, msg, curses.A_REVERSE)
 
-    def render_progress(self, win: SafeWinWrapper, _game):
-        pass
+    def render_progress(self, win: SafeWinWrapper):
+        if not self._progress:
+            return
+
+        ops = 0
+        done = 0
+        for i in self._games:
+            if not i.rsync:
+                continue
+            ops += len(i.rsync.pending)
+            done += len([j for j in i.rsync.pending if j.done])
+        if ops == 0:
+            return
+
+        running = None
+        for i in chain(*[j.rsync.pending for j in self._games if j.rsync]):
+            if i.running:
+                running = i
+        prog = \
+            float(sum([i.bytes for i in chain(*[j.rsync.pending for j in self._games if j.rsync])])) / \
+            float(sum([i.tot_bytes for i in chain(*[j.rsync.pending for j in self._games if j.rsync])]))
+
+        def rotate_bar(x: float):
+            x = int(x*1000)
+            return "|/-\\"[x % 4]
+
+        msg = f"[{rotate_bar(prog)}] Operations are in progress: {done:2d}/{ops:2d} | " \
+              f"Overall: {prog*100:5.1f}% | Speed: {running.speed if running else '0B/s'}"
+
+        fill = int(win.getmaxyx()[1] * prog)
+
+        win.addstr(win.getmaxyx()[0] - 2, 0, msg[:fill])
+        win.addstr(win.getmaxyx()[0] - 2, fill, msg[fill:])
 
     class Button:
         def __init__(self, _win, y, x, txt, _ret=None):
@@ -424,7 +464,7 @@ class Bugl:
             _str += ("#" * int(_prog*(_e-_s)*(self._l+1)))
             _str += ("-" * (self._l - len(_str)))
             self._win.addstr(self.maxy-3, 0, _str, h_center=True)
-            self._win.addstr(self.maxy-2, 0, f"{round((_s+_prog*(_e-_s))*100, 2)}%", h_center=True)
+            self._win.addstr(self.maxy-2, 0, f"{round((_s+_prog*(_e-_s))*100, 3)}%", h_center=True)
             self._win.refresh()
 
         def next_slice(self):
@@ -568,6 +608,8 @@ class Bugl:
         scr.erase()
         scr.refresh()
         # synced = False
+        o_maxy, o_maxx = -1, -1
+        o_progress = self._progress
 
         while True:
             maxy, maxx = scr.getmaxyx()
@@ -577,18 +619,23 @@ class Bugl:
                         self.dialog(scr, f'{self._selected.conf.get("name")} errored.',
                                     f'{self._selected.conf.get("name")} exited with code {self._selected.poll()}.\n'
                                     f'Error log:\n{" ".join(self._selected.args)}')
-            p_g_details.refresh_defaults(0,
-                                         0,
-                                         0,
-                                         lambda l: int(scr.getmaxyx()[1]/2)+1,
-                                         lambda l: scr.getmaxyx()[0]-1,
-                                         lambda l: scr.getmaxyx()[1])
-            p_g_select.refresh_defaults(0,
-                                        0,
-                                        0,
-                                        0,
-                                        lambda l: scr.getmaxyx()[0]-1,
-                                        lambda l: int(scr.getmaxyx()[1]/2))
+            if o_maxx != maxx or o_maxy != maxy or o_progress != self._progress:
+                p_g_details.refresh_defaults(
+                    0,
+                    0,
+                    0,
+                    lambda l: int(maxx/2)+1,
+                    lambda l: maxy-2-(1 if self._progress else 0),
+                    lambda l: maxx
+                )
+                p_g_select.refresh_defaults(
+                    0,
+                    0,
+                    0,
+                    0,
+                    lambda l: maxy-2-(1 if self._progress else 0),
+                    lambda l: int(maxx/2)
+                )
 
             p_g_select.erase()
             p_g_details.erase()
@@ -609,6 +656,7 @@ class Bugl:
             p_g_details.refresh()
 
             self.render_tooltip(scr, "main")
+            self.render_progress(scr)
 
             """if not synced:
                 sync_prog = self.dialog(scr, "Syncing with remote", "Connecting to remote", "progress")

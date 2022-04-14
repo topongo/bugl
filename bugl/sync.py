@@ -285,45 +285,60 @@ class RConfigs(Configs):
 
 class Rsync:
     class Transfer:
-        def __init__(self, cmd, files, t):
+        def __init__(self, cmd, files, t, tot_bytes):
             self.cmd = cmd
             self.files = files
             self.proc = None
             self.progress = 0
             self.count = -1
-            self.tot_bytes = 0
+            self.tot_bytes = tot_bytes
+            self.bytes = 0
             self.size = 0
             self.type = t
-            self.speed = "N/A"
+            self.speed = "0B/s"
             self.eta = "N/A"
+            self.running = False
+            self.done = False
 
         def commit(self):
             self.proc = Popen(self.cmd, stdout=PIPE, stderr=STDOUT)
+            self.running = True
             stop = 10
             rem = ""
+            data = ""
             while stop:
-                data = self.proc.stdout.readline(128).decode()
-                if "\r" not in data:
-                    lines = [data]
+                if self.proc.poll() is not None:
+                    break
                 else:
-                    data = rem + data
-                    lines = data.split("\r")
-                    rem = lines[-1]
-                    lines = lines[:-1]
+                    while True:
+                        data += self.proc.stdout.readline(10).decode()
+                        if "\r" in data:
+                            break
+
+                data = rem + data
+                lines = data.split("\r")
+                rem = lines[-1]
+                lines = lines[:-1]
                 for li in lines:
                     li = li.strip()
                     if li == '':
                         stop -= 1
                     if "B/s" in li:
-                        tot_bytes, perc, speed, eta = li.split()
-                        self.tot_bytes = int(tot_bytes.replace(",", ""))
-                        self.progress = float(perc.replace("%", "")) / 100
+                        bytes_, perc, speed, eta = li.split()
+                        self.bytes = int(bytes_.replace(",", ""))
+                        self.progress = float(perc.replace("%", "")) / 100.0
                         self.speed = speed
                         self.eta = eta
                     elif li.strip() in self.files:
                         self.count += 1
                 sleep(.5)
-            print()
+            self.bytes = self.tot_bytes
+            self.speed = "0B/s"
+            self.eta = "Finished"
+            self.progress = 1
+            self.count = len(self.files)
+            self.done = True
+            self.running = False
 
     class GenericError(Exception):
         pass
@@ -350,9 +365,15 @@ class Rsync:
         self.job = None
 
     def command_gen(self, dry=False):
-        return ["rsync", f"-{self.switches}" + ("n" if dry else ""), "-e", f"ssh -p {self.sync.conf.get('port')}"]
+        return ["rsync", f"-{self.switches}" + ("n" if dry else ""), "-e", f"ssh -p {self.sync.conf.get('port')}"] + \
+               ([] if not dry else ["--stats"])
 
     def gen_remote(self, path):
+        path = path.replace("~", f"/home/{self.sync.conf.get('user')}")
+        if self.sync.exists(path):
+            attr = self.sync.sftp.lstat(path)
+            if S_ISDIR(attr.st_mode) and path[-1] != "/":
+                path += "/"
         return f"{self.sync.conf.get('user')}@{self.sync.conf.get('host')}:{path}"
 
     def gen_job(self, local, remote, uniq):
@@ -368,7 +389,7 @@ class Rsync:
         :return:
         """
         local = os.path.expanduser(local)
-        remote = os.path.join(self.gen_remote(remote).replace("~", f"/home/{self.sync.conf.get('user')}"), uniq)
+        remote = self.gen_remote(os.path.join(remote, uniq))
         cmd_pull = lambda l: self.command_gen(dry=l) + [remote, local]
         cmd_push = lambda l: self.command_gen(dry=l) + [local, remote]
         proc_pull = Popen(cmd_pull(True), stdout=PIPE, stderr=STDOUT, stdin=DEVNULL)
@@ -393,7 +414,8 @@ class Rsync:
                 files = []
 
                 start = False
-                for ln_ in output.split("\n"):
+                it = output.split("\n")
+                for ln_ in it:
                     if start:
                         if "created directory" in ln_:
                             continue
@@ -404,17 +426,25 @@ class Rsync:
                         if "sending incremental file list" in ln_:
                             start = True
 
+                tot_bytes = 0
+                for ln_ in it:
+                    if "Total transferred file size:" in ln_:
+                        tot_bytes = int(
+                            ln_.split("Total transferred file size: ")[-1].split(" bytes")[0].replace(",", "")
+                        )
+
                 if files:
-                    self.pending.append(Rsync.Transfer(cmd(False), files, name))
+                    self.pending.append(Rsync.Transfer(cmd(False), files, name, tot_bytes))
                 ret[proc] = 0
         return ret[proc_pull], ret[proc_push]
 
     def commit(self):
         def th():
             self.running = True
-            while len(self.pending):
-                self.job = self.pending.pop(0)
+            for j in self.pending:
+                self.job = j
                 self.job.commit()
+            self.job = None
             self.running = False
 
         t = Thread(target=th, daemon=True)
