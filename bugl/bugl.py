@@ -205,7 +205,8 @@ class Bugl:
                 scr.erase()
                 if self.sync.conf.get("mode") == Sync.PKEY:
                     if self.dialog(scr, "Connection Error",
-                                   "Authentication error: private key authentication failed, try with a password?"):
+                                   "Authentication error: private key authentication failed, "
+                                   "try with password method?", "confirm"):
                         self._init_sync(scr, override_mode=Sync.PWD)
                 else:
                     self.dialog(scr, "Connection Error",
