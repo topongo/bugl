@@ -8,7 +8,6 @@ from sww import SafeWinWrapper
 from sync import Sync, RConfigs, Rsync
 from uuid import uuid4
 from itertools import chain
-from time import sleep
 
 
 def prepare_path(_f, _c_f=False, _folder=False):
@@ -190,9 +189,12 @@ class Bugl:
         self._section = "main"
         self._progress = True
 
-    def _init_sync(self, scr):
+    def _init_sync(self, scr, override_mode=None):
         if not self.sync:
             self.sync = Sync(self.sync_c, lambda l: self.dialog(scr, l, "Password:", "password"))
+
+        if override_mode is not None:
+            self.sync.override_mode(override_mode)
 
         if not self.sync.sftp:
             try:
@@ -201,8 +203,13 @@ class Bugl:
                 return
             except Sync.AuthError:
                 scr.erase()
-                self.dialog(scr, "Connection Error",
-                            "Authentication error, the password you entered is wrong or invalid.")
+                if self.sync.conf.get("mode") == Sync.PKEY:
+                    if self.dialog(scr, "Connection Error",
+                                   "Authentication error: private key authentication failed, try with a password?"):
+                        self._init_sync(scr, override_mode=Sync.PWD)
+                else:
+                    self.dialog(scr, "Connection Error",
+                                "Authentication error: the password you entered is wrong or invalid.")
                 return
             except Sync.NoHostSet:
                 scr.erase()
@@ -615,10 +622,9 @@ class Bugl:
             maxy, maxx = scr.getmaxyx()
             if self._selected:
                 if self._selected.tick():
-                    with open(self._selected.conf.get("stderr", path=True)) as e:
-                        self.dialog(scr, f'{self._selected.conf.get("name")} errored.',
-                                    f'{self._selected.conf.get("name")} exited with code {self._selected.poll()}.\n'
-                                    f'Error log:\n{" ".join(self._selected.args)}')
+                    self.dialog(scr, f'{self._selected.conf.get("name")} errored.',
+                                f'{self._selected.conf.get("name")} exited with code {self._selected.poll()}.\n'
+                                f'Error log:\n{" ".join(self._selected.args)}')
             if o_maxx != maxx or o_maxy != maxy or o_progress != self._progress:
                 p_g_details.refresh_defaults(
                     0,

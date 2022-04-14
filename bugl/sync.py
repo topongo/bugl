@@ -39,7 +39,9 @@ class Sync:
             self.conf.write()
         if self.conf.get("mode") not in (self.PKEY, self.PWD):
             raise TypeError("Invalid mode in sync config file")
-        if self.conf.get("mode") == self.PKEY:
+        else:
+            self.mode = self.conf.get("mode")
+        if self.mode == self.PKEY:
             if _full_init:
                 self._authenticate()
             else:
@@ -65,7 +67,7 @@ class Sync:
         return self.connected
 
     def _authenticate(self, custom_pwd=None):
-        if self.conf.get("mode") == self.PWD:
+        if self.mode == self.PWD:
             if custom_pwd:
                 pwd_mtd = custom_pwd
             else:
@@ -73,7 +75,7 @@ class Sync:
 
             if pwd_mtd is None:
                 raise ValueError("No password retrieving method supplied.")
-        elif self.conf.get("mode") == self.PKEY:
+        elif self.mode == self.PKEY:
             try:
                 self.pkey = RSAKey.from_private_key(open(self.conf.get("private_key_path", path=True)))
             except ssh_exception.PasswordRequiredException:
@@ -84,6 +86,12 @@ class Sync:
                     raise self.AuthError("Invalid private key password")
                 if self.pwd_mtd is None:
                     raise self.AuthError("No method supplied for password retrieving")
+
+    def override_mode(self, new_mode):
+        if new_mode in (Sync.PWD, Sync.PKEY):
+            self.mode = new_mode
+        else:
+            raise TypeError
 
     def expanduser(self, _path):
         if self.home is None:
@@ -108,7 +116,7 @@ class Sync:
 
     def connect(self, custom_pwd=None):
         # if auth method is pwd, ask for it
-        if self.conf.get("mode") == self.PWD or (self.conf.get("mode") == self.PKEY and self.pkey is None):
+        if self.mode == self.PWD or (self.mode == self.PKEY and self.pkey is None):
             self._authenticate(custom_pwd)
 
         if self.conf.get("host") is None:
@@ -124,10 +132,10 @@ class Sync:
             return
         else:
             try:
-                if self.conf.get("mode") == self.PKEY:
+                if self.mode == self.PKEY:
                     self.ssh.connect(self.conf.get("host"), port=self.conf.get("port"), username=self.conf.get("user"),
                                      pkey=self.pkey)
-                elif self.conf.get("mode") == self.PWD:
+                elif self.mode == self.PWD:
                     self.ssh.connect(self.conf.get("host"), port=self.conf.get("port"), username=self.conf.get("user"),
                                      password=self.pwd_mtd(f"Password for {self.conf.get('user')}"))
             except ValueError as e:
