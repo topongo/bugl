@@ -412,7 +412,7 @@ class Bugl:
                 running = i
         prog = \
             float(sum([i.bytes for i in chain(*[j.rsync.pending for j in self._games if j.rsync])])) / \
-            float(sum([i.tot_bytes for i in chain(*[j.rsync.pending for j in self._games if j.rsync])]))
+            float(sum([i.tot_bytes for i in chain(*[j.rsync.pending for j in self._games if j.rsync])]) + 0.0001)
 
         def rotate_bar(x: float):
             x = int(x*1000)

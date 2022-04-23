@@ -8,7 +8,7 @@ from hashlib import sha256
 from stat import S_ISDIR
 from threading import Thread
 from time import sleep
-
+from select import select
 
 LOCAL = 0
 REMOTE = 1
@@ -313,33 +313,41 @@ class Rsync:
             self.running = True
             stop = 10
             rem = ""
-            data = ""
             while stop:
-                if self.proc.poll() is not None:
-                    break
-                else:
-                    while True:
-                        data += self.proc.stdout.readline(10).decode()
-                        if "\r" in data:
-                            break
+                data = rem
+                try:
+                    if self.proc.poll() is not None:
+                        break
+                    else:
+                        while True:
+                            stdout, _, _ = select([self.proc.stdout], [], [], 2)
+                            if stdout:
+                                stdout = stdout[0]
+                            data += stdout.readline(10).decode()
+                            if "\r" in data:
+                                break
+                            sleep(.1)
 
-                data = rem + data
-                lines = data.split("\r")
-                rem = lines[-1]
-                lines = lines[:-1]
-                for li in lines:
-                    li = li.strip()
-                    if li == '':
-                        stop -= 1
-                    if "B/s" in li:
-                        bytes_, perc, speed, eta = li.split()
-                        self.bytes = int(bytes_.replace(",", ""))
-                        self.progress = float(perc.replace("%", "")) / 100.0
-                        self.speed = speed
-                        self.eta = eta
-                    elif li.strip() in self.files:
-                        self.count += 1
-                sleep(.5)
+                    data = rem + data
+                    lines = data.split("\r")
+                    rem = lines[-1]
+                    lines = lines[:-1]
+                    for li in lines:
+                        li = li.strip()
+                        if li == '':
+                            stop -= 1
+                        if "B/s" in li:
+                            bytes_, perc, speed, eta = li.split()
+                            self.bytes = int(bytes_.replace(",", ""))
+                            self.progress = float(perc.replace("%", "")) / 100.0
+                            self.speed = speed
+                            self.eta = eta
+                        elif li.strip() in self.files:
+                            self.count += 1
+                except ValueError:
+                    self.proc.stdout.read()
+                finally:
+                    sleep(.1)
             self.bytes = self.tot_bytes
             self.speed = "0B/s"
             self.eta = "Finished"
@@ -431,7 +439,7 @@ class Rsync:
                             break
                         files.append(ln_)
                     else:
-                        if "sending incremental file list" in ln_:
+                        if " incremental file list" in ln_:
                             start = True
 
                 tot_bytes = 0
