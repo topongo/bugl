@@ -313,7 +313,14 @@ class Rsync:
             self.running = True
             stop = 10
             rem = ""
-            while stop:
+            data = ""
+            while True:
+                if self.proc.poll() is None:
+                    rd, _, _ = select([self.proc.stdout], [], [], __timeout=.5)
+                    if rd:
+                        data +=
+
+                continue
                 data = rem
                 try:
                     if self.proc.poll() is not None:
