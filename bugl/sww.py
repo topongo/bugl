@@ -1,6 +1,3 @@
-import curses
-
-
 class SafeWinWrapper:
     def __init__(self, win):
         self.win = win
@@ -47,9 +44,9 @@ class SafeWinWrapper:
                     _w = _w[1:]
                 if len(_buff) == 0 and len(_w) > _mx:
                     rows.append(_w[:_mx+1-(_x if k_align else 0)])
-                elif len(_buff+_w) >= _mx+1:
+                elif len(_buff+_w)+1 >= _mx+1:
                     rows.append(_buff)
-                    _buff = ""
+                    _buff = _w + " "
                 else:
                     _buff += _w + " "
             rows.append(_buff)
