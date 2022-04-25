@@ -70,7 +70,7 @@ class Game:
             self.conf.set("data", tmp)
 
     def run(self):
-        self.args = [self.conf.get("exec"), self.conf.get("exec_path")] + self.conf.get("exec_args")
+        self.args = [self.conf.get("exec"), self.conf.get("exec_path", path=True)] + self.conf.get("exec_args")
         self.conf.set("latest_launch", datetime.now().timestamp())
         self.conf.game_conf.write()
         self._session_started = True
@@ -111,6 +111,9 @@ class Game:
 
     def wait(self):
         self._proc.wait()
+
+    def kill(self):
+        self._proc.kill()
 
     class GameConfig:
         PLACEHOLDERS = {
@@ -172,7 +175,7 @@ class Game:
 
 
 class Bugl:
-    VERSION = 0.2
+    VERSION = "0.3.2"
 
     def __init__(self, conf: Configs, sync_conf: Configs):
         try:
@@ -295,7 +298,7 @@ class Bugl:
                     self.dialog(win, "No sync required", "Files are identical")
                 return
             else:
-                r_conf = RConfigs(self.sync, self.game_defaults, conf.config_path)
+                r_conf = RConfigs(self.sync, conf.template, conf.config_path)
                 try:
                     if r_conf.get("__update_time__") > conf.get("__update_time__"):
                         self.sync.download(conf.config_path, callback=callback)
@@ -386,16 +389,14 @@ class Bugl:
         msg = f"BUGL {self.VERSION} - "
         msg += {
             "main": f"[{chr(8593)+chr(8595)}] to navigate, [Enter] to play, "
-                    f"[S] to sync, [Q] to exit.",
+                    f"[S] to sync, {'[Shift+K] to kill selected game, ' if self._selected.is_alive() else ''}"
+                    f"[Q] to exit.",
             "dialog": f"[{chr(8592)+chr(8594)}] to navigate, [Enter] to select.",
         }[_section]
         msg += (" " * (win.getmaxyx()[1] - 1 - len(msg)))
         win.addstr(win.getmaxyx()[0]-1, 0, msg, curses.A_REVERSE)
 
-    def render_progress(self, win: SafeWinWrapper):
-        if not self._progress:
-            return
-
+    def render_progress(self, win: SafeWinWrapper, bar):
         ops = 0
         done = 0
         for i in self._games:
@@ -403,28 +404,41 @@ class Bugl:
                 continue
             ops += len(i.rsync.pending)
             done += len([j for j in i.rsync.pending if j.done])
-        if ops == 0:
-            return
+        if ops != 0:
+            if done == ops and self._progress:
+                msg = f"[✔️] Operations completed. {done:2d}/{ops:2d}"
 
-        running = None
-        for i in chain(*[j.rsync.pending for j in self._games if j.rsync]):
-            if i.running:
-                running = i
-        prog = \
-            float(sum([i.bytes for i in chain(*[j.rsync.pending for j in self._games if j.rsync])])) / \
-            float(sum([i.tot_bytes for i in chain(*[j.rsync.pending for j in self._games if j.rsync])]) + 0.0001)
+                msg += (" " * (win.getmaxyx()[1] - len(msg)))
 
-        def rotate_bar(x: float):
-            x = int(x*1000)
-            return "|/-\\"[x % 4]
+                win.addstr(win.getmaxyx()[0] - 2, 0, msg, _attr=curses.A_BLINK|curses.A_REVERSE)
+            else:
+                self._progress = True
+                running = None
+                for i in chain(*[j.rsync.pending for j in self._games if j.rsync]):
+                    if i.running:
+                        running = i
 
-        msg = f"[{rotate_bar(prog)}] Operations are in progress: {done:2d}/{ops:2d} | " \
-              f"Overall: {prog*100:5.1f}% | Speed: {running.speed if running else '0B/s'}"
+                tot_bytes = sum([i.tot_bytes for i in chain(*[j.rsync.pending for j in self._games if j.rsync])])
+                done_bytes = sum([i.bytes for i in chain(*[j.rsync.pending for j in self._games if j.rsync])])
+                if tot_bytes == 0:
+                    prog = 1.0 * float(done) / float(ops)
+                else:
+                    prog = float(done_bytes) / float(tot_bytes)
+                bars = '|/-\\'
+                msg = f"[{bars[bar[0] % 4]}] Operations are in progress: {done:2d}/{ops:2d} | " \
+                      f"Overall: {prog*100:5.1f}% | Speed: {running.speed if running else '0B/s'}"
+                bar[0] += 1
+                fill = int(win.getmaxyx()[1] * prog)
 
-        fill = int(win.getmaxyx()[1] * prog)
+                msg += (" " * (win.getmaxyx()[1] - len(msg)))
 
-        win.addstr(win.getmaxyx()[0] - 2, 0, msg[:fill])
-        win.addstr(win.getmaxyx()[0] - 2, fill, msg[fill:])
+                win.addstr(win.getmaxyx()[0] - 2, 0, msg[:fill], _attr=curses.A_REVERSE)
+                if fill < win.getmaxyx()[0]:
+                    win.addstr(win.getmaxyx()[0] - 2, fill, msg[fill:])
+
+            if done == ops:
+                return 2
+            return 1
 
     class Button:
         def __init__(self, _win, y, x, txt, _ret=None):
@@ -618,6 +632,7 @@ class Bugl:
         # synced = False
         o_maxy, o_maxx = -1, -1
         o_progress = self._progress
+        bar = [0]
 
         while True:
             maxy, maxx = scr.getmaxyx()
@@ -663,7 +678,7 @@ class Bugl:
             p_g_details.refresh()
 
             self.render_tooltip(scr, "main")
-            self.render_progress(scr)
+            op = self.render_progress(scr, bar)
 
             """if not synced:
                 sync_prog = self.dialog(scr, "Syncing with remote", "Connecting to remote", "progress")
@@ -683,12 +698,23 @@ class Bugl:
             inp = scr.getch()
 
             if inp == curses.KEY_DOWN:
+                if op == 2:
+                    self._progress = False
                 self.select("next")
             if inp == curses.KEY_UP:
+                if op == 2:
+                    self._progress = False
                 self.select("prev")
             elif inp == curses.KEY_ENTER or inp == ord("\n"):
+                if op == 2:
+                    self._progress = False
                 if self._selected:
-                    self._selected.run()
+                    if self._selected.is_alive():
+                        self.dialog(scr, "Already running", "The selected game is already running, close it before "
+                                                            "starting it again. If it's not responding press "
+                                                            "Shift+K to kill it.")
+                    else:
+                        self._selected.run()
             elif inp == curses.KEY_EXIT or inp == ord("q"):
                 if self.dialog(scr, "Quit", "Are you sure you want to quit?", "confirm"):
                     if not self.sync or not self.sync.sftp:
@@ -712,6 +738,12 @@ class Bugl:
                         self._sync_all()
                     curses.napms(1000)
                 scr.erase()
+            elif inp == ord("K"):
+                if self._selected.is_alive():
+                    if self.dialog(scr, "Kill game?", "Are you sure of killing the game? Note that every game "
+                                                      "progress not yet saved will be likely lost.",
+                                   "confirm"):
+                        self._selected.kill()
             elif inp == ord("t"):
                 # put tests here
                 self.render_loading(scr, "Generating rsync object")

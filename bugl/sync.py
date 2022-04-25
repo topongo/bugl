@@ -9,6 +9,7 @@ from stat import S_ISDIR
 from threading import Thread
 from time import sleep
 from select import select
+from sys import stderr
 
 LOCAL = 0
 REMOTE = 1
@@ -196,7 +197,7 @@ class Sync:
             self.sftp.get(local, remote)
         return [local]
 
-    def download_a(self, remote, local=None, diag_callback=None):
+    def download_a(self, remote, local=None):
         # TODO: add full support for progress dialog objects
         created = []
         if local is None:
@@ -275,9 +276,9 @@ class RConfigs(Configs):
         if self.ex_rem and self.ex_loc:
             return False
 
-        with open(self.config_path) as l, self.sync.sftp.open(self.config_path) as r:
+        with open(self.config_path) as l_, self.sync.sftp.open(self.config_path) as r:
             while True:
-                l_b, r_b = l.read(1024), r.read(1024)
+                l_b, r_b = l_.read(1024), r.read(1024)
                 if l_b != r_b:
                     return False
                 elif l_b == b"":
@@ -309,52 +310,53 @@ class Rsync:
             self.done = False
 
         def commit(self):
-            self.proc = Popen(self.cmd, stdout=PIPE, stderr=STDOUT)
+            self.proc = Popen(self.cmd, stdout=PIPE, stderr=STDOUT, bufsize=1000)
+            sleep(2)
             self.running = True
-            stop = 10
-            rem = ""
-            data = ""
-            while True:
-                if self.proc.poll() is None:
-                    rd, _, _ = select([self.proc.stdout], [], [], __timeout=.5)
-                    if rd:
-                        data +=
+            sasso = []
 
-                continue
-                data = rem
-                try:
-                    if self.proc.poll() is not None:
+            def split_read(proc):
+                buff = b""
+                stop = False
+                count = 0
+                while not stop:
+                    if proc.poll() is not None:
+                        rd, _ = proc.communicate()
+                        for j in rd.splitlines(True):
+                            yield j
                         break
+                    rd, _, _ = select([proc.stdout], [], [], .1)
+                    if rd:
+                        ch = rd[0].read(1)
+                        if ch == b"":
+                            count += 1
+                        else:
+                            count = 0
+                        buff += ch
+                        if ch == b"\r" or ch == b"\n":
+                            yield buff
+                            buff = b""
                     else:
-                        while True:
-                            stdout, _, _ = select([self.proc.stdout], [], [], 2)
-                            if stdout:
-                                stdout = stdout[0]
-                            data += stdout.readline(10).decode()
-                            if "\r" in data:
-                                break
-                            sleep(.1)
+                        count += 1
+                    if count > 1000:
+                        count = 0
+                        stop = True
+                yield buff
 
-                    data = rem + data
-                    lines = data.split("\r")
-                    rem = lines[-1]
-                    lines = lines[:-1]
-                    for li in lines:
-                        li = li.strip()
-                        if li == '':
-                            stop -= 1
-                        if "B/s" in li:
-                            bytes_, perc, speed, eta = li.split()
-                            self.bytes = int(bytes_.replace(",", ""))
-                            self.progress = float(perc.replace("%", "")) / 100.0
-                            self.speed = speed
-                            self.eta = eta
-                        elif li.strip() in self.files:
-                            self.count += 1
-                except ValueError:
-                    self.proc.stdout.read()
-                finally:
-                    sleep(.1)
+            for line in split_read(self.proc):
+                line = line.decode()
+                if "B/s" in line:
+                    if ":" not in line:
+                        bytes_, perc, speed = line.split()
+                        eta = "0:00:00"
+                    else:
+                        bytes_, perc, speed, eta = line.split()
+                    self.bytes = int(bytes_.replace(",", ""))
+                    self.progress = float(perc.replace("%", "")) / 100.0
+                    self.speed = speed
+                    self.eta = eta
+                elif line.strip() in self.files:
+                    self.count += 1
             self.bytes = self.tot_bytes
             self.speed = "0B/s"
             self.eta = "Finished"
@@ -413,8 +415,13 @@ class Rsync:
         """
         local = os.path.expanduser(local)
         remote = self.gen_remote(os.path.join(remote, uniq))
-        cmd_pull = lambda l: self.command_gen(dry=l) + [remote, local]
-        cmd_push = lambda l: self.command_gen(dry=l) + [local, remote]
+
+        def cmd_pull(l_):
+            return self.command_gen(dry=l_) + [remote, local]
+
+        def cmd_push(l_):
+            return self.command_gen(dry=l_) + [local, remote]
+
         proc_pull = Popen(cmd_pull(True), stdout=PIPE, stderr=STDOUT, stdin=DEVNULL)
         proc_push = Popen(cmd_push(True), stdout=PIPE, stderr=STDOUT, stdin=DEVNULL)
         ret = {}

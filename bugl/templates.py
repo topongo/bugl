@@ -25,10 +25,10 @@ game_shared = (
 )
 
 sync_defaults = {
-    "user": None,
-    "host": None,
+    "user": "",
+    "host": "",
     "port": 22,
-    "private_key_path": None,
+    "private_key_path": "",
     "mode": Sync.PWD,
     "remote_path": "~/.config/bugl/",
     "remote_data_path": "~/data/bugl/data/"
