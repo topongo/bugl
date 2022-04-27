@@ -251,20 +251,21 @@ class Sync:
 
 
 class RConfigs(Configs):
-    def __init__(self, sync: Sync, template, config_path=None, load_from=REMOTE):
+    def __init__(self, sync: Sync, template, config_path=None, load_from=REMOTE, raise_for_update_time=True):
         self.sync = sync
         self.ex_loc = os.path.exists(config_path)
         self.ex_rem = sync.exists(config_path)
         if load_from == LOCAL:
             if self.ex_loc:
-                Configs.__init__(self, template, config_path=config_path)
+                Configs.__init__(self, template, config_path=config_path, raise_for_update_time=raise_for_update_time)
             else:
                 raise FileNotFoundError
         elif load_from == REMOTE:
             if self.ex_rem:
                 try:
                     d = json.load(self.sync.sftp.open(config_path))
-                    Configs.__init__(self, template, data=d, config_path=config_path)
+                    Configs.__init__(self, template, data=d, config_path=config_path,
+                                     raise_for_update_time=raise_for_update_time)
                 except json.decoder.JSONDecodeError:
                     raise self.ConfigFormatErrorException
             else:
@@ -292,20 +293,29 @@ class RConfigs(Configs):
         self.write()
 
 
+class Job:
+    def __init__(self, files, tot_bytes):
+        self.files = files
+        self.tot_bytes = tot_bytes
+        self.speed = "N/A"
+        self.eta = "N/A"
+        self.speed = "N/A"
+        self.running = False
+        self.done = False
+        self.count = 0
+        self.bytes = 0
+        self.progress = 0
+
+
 class Rsync:
-    class Transfer:
+    class Transfer(Job):
         def __init__(self, cmd, files, t, tot_bytes):
+            super().__init__(files, tot_bytes)
             self.cmd = cmd
-            self.files = files
             self.proc = None
-            self.progress = 0
             self.count = -1
-            self.tot_bytes = tot_bytes
-            self.bytes = 0
-            self.size = 0
             self.type = t
             self.speed = "0B/s"
-            self.eta = "N/A"
             self.running = False
             self.done = False
 
@@ -313,7 +323,6 @@ class Rsync:
             self.proc = Popen(self.cmd, stdout=PIPE, stderr=STDOUT, bufsize=1000)
             sleep(2)
             self.running = True
-            sasso = []
 
             def split_read(proc):
                 buff = b""

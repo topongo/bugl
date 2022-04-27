@@ -298,13 +298,13 @@ class Bugl:
                     self.dialog(win, "No sync required", "Files are identical")
                 return
             else:
-                r_conf = RConfigs(self.sync, conf.template, conf.config_path)
                 try:
+                    r_conf = RConfigs(self.sync, conf.template, conf.config_path)
                     if r_conf.get("__update_time__") > conf.get("__update_time__"):
                         self.sync.download(conf.config_path, callback=callback)
                     else:
                         self.sync.upload(conf.config_path, callback=callback)
-                except KeyError:
+                except Configs.MissingPropertyException:
                     if self.dialog(win, "Sync Config",
                                    "Warning: remote data has no __update_time__ property.\n"
                                    "Probably it's an older version, upload local to remote?",
@@ -405,12 +405,15 @@ class Bugl:
             ops += len(i.rsync.pending)
             done += len([j for j in i.rsync.pending if j.done])
         if ops != 0:
-            if done == ops and self._progress:
-                msg = f"[✔️] Operations completed. {done:2d}/{ops:2d}"
+            if done == ops:
+                if self._progress:
+                    msg = f"[✔️] Operations completed. {done:2d}/{ops:2d}"
 
-                msg += (" " * (win.getmaxyx()[1] - len(msg)))
+                    msg += (" " * (win.getmaxyx()[1] - len(msg)))
 
-                win.addstr(win.getmaxyx()[0] - 2, 0, msg, _attr=curses.A_BLINK|curses.A_REVERSE)
+                    win.addstr(win.getmaxyx()[0] - 2, 0, msg, _attr=curses.A_BLINK|curses.A_REVERSE)
+                else:
+                    pass
             else:
                 self._progress = True
                 running = None
