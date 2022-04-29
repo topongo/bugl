@@ -5,7 +5,7 @@ import os
 from datetime import datetime, timedelta
 from TopongoConfigs.configs import Configs
 from sww import SafeWinWrapper
-from sync import Sync, RConfigs, Rsync
+from sync import Sync, RConfigs, Rsync, Job
 from uuid import uuid4
 from itertools import chain
 
@@ -165,13 +165,43 @@ class Game:
 
     def sync_data(self):
         if not self.rsync.running:
-            self.rsync.commit()
+            self.rsync.run()
 
     def sync_status(self):
         if self.rsync.running:
-            return self.rsync.job.progress
+            return self.rsync.job.progress()
         else:
             return "Not running"
+
+
+class JobRunner:
+    def __init__(self, *jobs: Job):
+        self.jobs = []
+        for j in jobs:
+            if not isinstance(j, Job):
+                raise TypeError
+            self.jobs.append(j)
+
+    def run_all(self):
+        for j in self.jobs:
+            if not j.done and not j.running:
+                j.run()
+
+    def progress(self):
+        if len(self.jobs) == 0:
+            return 0
+        else:
+            displayed = [j for j in self.jobs if j.display]
+            tot_p = sum([j.progress() for j in displayed])
+            return tot_p / len(displayed)
+
+    def add_job(self, job):
+        if isinstance(job, Job):
+            self.jobs.append(job)
+        else:
+            raise TypeError(job)
+
+
 
 
 class Bugl:
@@ -188,6 +218,7 @@ class Bugl:
         self.rsync = None
         self.game_defaults = Game.GameConfig(_c_d, self.conf).game_conf
         self._games = []
+        self._jobs = JobRunner()
         self._selected = None
         self._section = "main"
         self._progress = True
@@ -231,8 +262,8 @@ class Bugl:
         self.sync.prepare_path(self.sync.conf.get("remote_data_path"))
         return Rsync(self.sync)
 
-    def render_loading(self, scr, title):
-        self.dialog(scr, title, "Loading...", _type="blank")
+    def render_loading(self, scr, title, msg="Loading..."):
+        self.dialog(scr, title, msg, _type="blank")
 
     def add_game(self, _config_path):
         try:
@@ -274,8 +305,17 @@ class Bugl:
             else:
                 raise ValueError
 
-    def sync_conf(self, conf: Configs, callback=None, win=None, force_pull=False, force_push=False):
+    def check_for_sync(self, win):
+        o = {}
+        for conf in chain((self.conf, self.sync_c), map(lambda l: l.conf.game_conf, self._games)):
+            try:
+                rconf = RConfigs(self.sync, conf.template, conf.config_path)
+            except FileNotFoundError:
+                self.sync_conf(conf, win=win)
+
+    def sync_conf(self, conf: Configs, callback=None, win=None, force_pull=False, force_push=False) -> tuple[int, int]:
         conf.write()
+        up, down = 0, 0
 
         def mtime(path):
             return datetime.fromtimestamp(os.stat(path).st_mtime), \
@@ -286,8 +326,10 @@ class Bugl:
 
         if force_pull:
             self.sync.download(conf.config_path, callback=callback)
+            down += 1
         if force_push:
             self.sync.upload(conf.config_path, callback=callback)
+            up += 1
 
         if self.sync.exists(conf.config_path):
             if self.sync.hash_compare(conf.config_path):
@@ -296,31 +338,42 @@ class Bugl:
                     callback(1, 1)
                 if win:
                     self.dialog(win, "No sync required", "Files are identical")
-                return
+                return 0, 0
             else:
                 try:
                     r_conf = RConfigs(self.sync, conf.template, conf.config_path)
                     if r_conf.get("__update_time__") > conf.get("__update_time__"):
                         self.sync.download(conf.config_path, callback=callback)
+                        down += 1
                     else:
                         self.sync.upload(conf.config_path, callback=callback)
+                        up += 1
                 except Configs.MissingPropertyException:
-                    if self.dialog(win, "Sync Config",
-                                   "Warning: remote data has no __update_time__ property.\n"
-                                   "Probably it's an older version, upload local to remote?",
-                                   "confirm"):
-                        self.sync.upload(conf.config_path, callback=callback)
-                    l_mtime, r_mtime = mtime(conf.config_path)
-                    if l_mtime > r_mtime:
-                        # local file is newer, upload
-                        self.sync.upload(conf.config_path, callback=callback)
-                    elif l_mtime < r_mtime:
-                        self.sync.download(conf.config_path, callback=callback)
+                    if win:
+                        if self.dialog(win, "Sync Config",
+                                       "Warning: remote data has no __update_time__ property.\n"
+                                       "Probably it's an older version, upload local to remote?",
+                                       "confirm"):
+                            self.sync.upload(conf.config_path, callback=callback)
+                            up += 1
+                        else:
+                            l_mtime, r_mtime = mtime(conf.config_path)
+                            if l_mtime > r_mtime:
+                                # local file is newer, upload
+                                self.sync.upload(conf.config_path, callback=callback)
+                                up += 1
+                            elif l_mtime < r_mtime:
+                                self.sync.download(conf.config_path, callback=callback)
+                                down += 1
+                    else:
+                        print()
         else:
             # file not found on remote, upload
             self.sync.upload(conf.config_path, callback=callback)
+            up += 1
+        return down, up
 
-    def sync_data(self, g: Game, win):
+    def sync_data(self, g: Game, win, operation=Rsync.PULL):
         if self._init_sync(win):
             rem = f"{self.sync.conf.get('remote_data_path')}{g.conf.get('id')}/"
             if win:
@@ -333,41 +386,62 @@ class Bugl:
                 else:
                     if os.path.isdir(loc) and not os.path.islink(loc) and loc[-1] != "/":
                         loc += "/"
-                ll, sh = g.rsync.gen_job(loc, rem, uniq)
-                if ll == -1:
-                    if not self.dialog(win, "Sync Data",
-                                       f"Data folder corresponding to \n{loc}\ndoesn't exists on remote,"
-                                       f" upload it?", "confirm",
-                                       butts=("Yes", "No")):
+                j = g.rsync.gen_job(loc, rem, uniq, operation=operation)
+                if isinstance(j, int):
+                    if j == 0:
                         return
+                    if j == -1:
+                        if operation == Rsync.PULL:
+                            if not self.dialog(win, "Sync Data",
+                                               f"Data folder corresponding to \n{loc}\ndoesn't exists on remote,"
+                                               f" upload it?", "confirm"):
+                                return
+                            else:
+                                self.sync_data(g, win, Rsync.PUSH)
+                        else:
+                            if self.dialog(win, "Sync Data",
+                                           "warning: data on local doesn't exist. Download id?", "confirm"):
+                                self.sync_data(g, win, Rsync.PULL)
+                            else:
+                                return
+
+                    self.dialog(win, "Sync Data",
+                                f"Error: rsync exited with code {j} during data sync.")
+                    return
+
+                self._jobs.add_job(j)
+
             if g.rsync.pending:
                 changed = "\"" + "\"; \"".join(chain(*map(lambda l: l.files, g.rsync.pending))) + "\""
                 self.dialog(win, "Sync Data", f"Files which receives changes:\n\"{changed}")
                 g.sync_data()
-
-                """
-                prog = self.dialog(win, "Uploading using rsync...", "Preparing...", "progress")
-                while True:
-                    prog.update(g.rsync.job.progress, 1.0)
-                    sleep(1)"""
             else:
                 self.dialog(win, "Sync Data", f"No data to be synced.")
 
         else:
             self.dialog(win, "Sync Data", "Can't sync data without connection with remote.")
 
-    def write(self, sync=False):
+    def write(self, sync=False, win=None):
         self.conf.write()
         for _g in self._games:
             _g.conf.game_conf.write()
         if sync:
-            self._sync_all()
+            return self._sync_all(win=win)
 
-    def _sync_all(self):
+    def _sync_all(self, win=None):
+        down, up = 0, 0
         if self.sync and self.sync.sftp:
-            self.sync_conf(self.conf)
+            for i, o in zip(self.sync_conf(self.conf, win=win), (down, up)):
+                o += i
+            for i, o in zip(self.sync_conf(self.sync_c, win=win), (down, up)):
+                o += i
             for _g in self._games:
-                self.sync_conf(_g.conf.game_conf)
+                for i, o in zip(self.sync_conf(_g.conf.game_conf, win=win), (down, up)):
+                    o += i
+        if win:
+            self.dialog(win, "Sync Done", f"Downloaded: {down}\nUploaded: {up}\nTotal: {up + down}")
+        else:
+            return down, up
 
     def ls_games(self, win):
         pass
@@ -389,7 +463,8 @@ class Bugl:
         msg = f"BUGL {self.VERSION} - "
         msg += {
             "main": f"[{chr(8593)+chr(8595)}] to navigate, [Enter] to play, "
-                    f"[S] to sync, {'[Shift+K] to kill selected game, ' if self._selected.is_alive() else ''}"
+                    f"[S] to sync, "
+                    f"{'[Shift+K] to kill selected game, ' if self._selected and self._selected.is_alive() else ''}"
                     f"[Q] to exit.",
             "dialog": f"[{chr(8592)+chr(8594)}] to navigate, [Enter] to select.",
         }[_section]
@@ -593,6 +668,14 @@ class Bugl:
         curses.curs_set(False)
         p_g_select = SafeWinWrapper(curses.newpad(300, int(maxx/2)-1))
         p_g_details = SafeWinWrapper(curses.newpad(300, int(maxx/2)-1))
+
+        self.render_loading(scr, "Connecting")
+        if self._init_sync(scr):
+            self.check_for_sync(scr)
+        else:
+            if not self.dialog(scr, "Offline", "Cannot connect to remote, continue in offline mode?", "confirm"):
+                return 0
+
         for path_, ex_ in faulty_confs.items():
             if self.dialog(scr, f"Config loading error",
                            f"The config at path {path_} have an error:\nDownload this file from remote?",
@@ -606,6 +689,7 @@ class Bugl:
                     except Configs.ConfigFormatErrorException:
                         self.dialog(scr, "Download Failed", f"Even the remote file contains errors.\n"
                                                             f"Please manually check {path_}.")
+
 
         if not self._games:
             if self.dialog(scr, f"No games found",
@@ -726,7 +810,7 @@ class Bugl:
                             self.render_loading(scr, "Connecting")
                             if self._init_sync(scr):
                                 self.render_loading(scr, "Syncing")
-                                self.write(sync=True)
+                                self.write(sync=True, win=scr)
                     return 0
                 else:
                     scr.erase()
@@ -736,10 +820,10 @@ class Bugl:
                 if self._init_sync(scr):
                     self.render_loading(scr, "Syncing")
                     if self._selected:
-                        self.sync_conf(self._selected.conf.game_conf, win=scr)
+                        down, up = self.sync_conf(self._selected.conf.game_conf, win=scr)
                     else:
-                        self._sync_all()
-                    curses.napms(1000)
+                        down, up = self._sync_all()
+
                 scr.erase()
             elif inp == ord("K"):
                 if self._selected.is_alive():
