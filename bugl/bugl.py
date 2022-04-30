@@ -432,7 +432,8 @@ class Bugl:
 
     def sync_data(self, g: Game, win, operation=Rsync.PULL):
         if self._init_sync(win):
-            rem = f"{self.sync.conf.get('remote_data_path')}{g.conf.get('id')}/"
+            rem = f"{self.sync.conf.get('remote_data_path', path=True, expanduser_func=self.sync.expanduser)}" \
+                  f"{g.conf.get('id')}/"
             if win:
                 self.render_loading(win, "Starting transaction")
             g.rsync = self.gen_rsync(win)
@@ -450,10 +451,12 @@ class Bugl:
                     if j == -1:
                         if operation == Rsync.PULL:
                             if not self.dialog(win, "Sync Data",
-                                               f"Data folder corresponding to \n{loc}\ndoesn't exists on remote,"
-                                               f" upload it?", "confirm"):
+                                                f"Data folder corresponding to \n{loc}\ndoesn't exists on remote,"
+                                                f" upload it?", "confirm"):
                                 return
                             else:
+                                if not self.sync.exists(rem):
+                                    self.sync.sftp.mkdir(rem)
                                 self.sync_data(g, win, Rsync.PUSH)
                         else:
                             if self.dialog(win, "Sync Data",
@@ -461,14 +464,10 @@ class Bugl:
                                 self.sync_data(g, win, Rsync.PULL)
                             else:
                                 return
-
-                    self.dialog(win, "Sync Data",
-                                f"Error: rsync exited with code {j} during data sync.")
                     return
-
-                self._jobs.add_job(j)
-
-            self._jobs.run_threaded()
+                else:
+                    self._jobs.add_job(j)
+                    self._jobs.run_threaded()
             if not self._jobs.running():
                 self.dialog(win, "Sync Data", f"No data to be synced.")
 
@@ -592,7 +591,7 @@ class Bugl:
             _str += ("#" * int(_prog*(_e-_s)*self._l))
             _str += ("-" * (self._l - len(_str)))
             self._win.addstr(self.maxy-3, 0, _str, h_center=True)
-            self._win.addstr(self.maxy-2, 0, f"{round((_s+_prog*(_e-_s))*100, 3)}%", h_center=True)
+            self._win.addstr(self.maxy-2, 0, f"{round((_s+_prog*(_e-_s))*100, 1)}%", h_center=True)
             self._win.refresh()
 
         def next_slice(self):
@@ -693,7 +692,7 @@ class Bugl:
                         sel += 1
         diag.erase()
 
-    def gui(self, scr: SafeWinWrapper, faulty_confs):
+    def gui(self, scr: SafeWinWrapper, faulty_confs, args):
         def panic(reason):
             scr.erase()
             self.dialog(scr, "!BUGL PANIC!",
@@ -723,16 +722,17 @@ class Bugl:
                 self.write()
 
         # check for remote updates
-        self.render_loading(scr, "BUGL Startup", "Connecting to remote...")
-        if self._init_sync(scr):
-            prog_ = self.dialog(scr, "BUGL Startup", "Synchronizing system configs...", "progress")
-            prog_.update(0, 1)
-            if self.check_for_sync(scr, prog_) == -1:
-                panic("Could not remain synced to remote.")
-                return 1
-        else:
-            if not self.dialog(scr, "Offline", "Cannot connect to remote, continue in offline mode?", "confirm"):
-                return 0
+        if not args.skip_check:
+            self.render_loading(scr, "BUGL Startup", "Connecting to remote...")
+            if self._init_sync(scr):
+                prog_ = self.dialog(scr, "BUGL Startup", "Synchronizing system configs...", "progress")
+                prog_.update(0, 1)
+                if self.check_for_sync(scr, prog_) == -1:
+                    panic("Could not remain synced to remote.")
+                    return 1
+            else:
+                if not self.dialog(scr, "Offline", "Cannot connect to remote, continue in offline mode?", "confirm"):
+                    return 0
 
         # check for faulty configs
         for path_, ex_ in faulty_confs.items():
@@ -941,10 +941,15 @@ def prepare():
 
 
 if __name__ == "__main__":
+    from argparse import ArgumentParser
+
+    arg_p = ArgumentParser("bugl")
+    arg_p.add_argument("--skip-check", action="store_true")
+    args_ = arg_p.parse_args()
     while True:
         bugl, errs = prepare()
         try:
-            r = curses.wrapper(lambda l: bugl.gui(SafeWinWrapper(l), errs))
+            r = curses.wrapper(lambda l: bugl.gui(SafeWinWrapper(l), errs, args_))
             if r != -1:
                 bugl.write()
                 exit()

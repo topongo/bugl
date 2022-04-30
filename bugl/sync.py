@@ -99,7 +99,7 @@ class Sync:
         if self.home is None:
             _, stdout, _ = self.ssh.exec_command("echo -n ~")
             self.home = stdout.read().decode()
-        return self.home
+        return os.path.join(self.home, _path.replace("~/", "").replace("~", ""))
 
     def prepare_path(self, path_):
         created = []
@@ -245,6 +245,8 @@ class Sync:
 
     def exists(self, path):
         try:
+            if path[-1] == "/":
+                path = path[:-1]
             return os.path.basename(path) in self.sftp.listdir(
                 os.path.dirname(path.replace("~", f"/home/{self.conf.get('user')}")))
         except FileNotFoundError:
@@ -360,7 +362,7 @@ class Rsync:
             self.type = t
             self.speed = "0B/s"
 
-        def run(self):
+        def run(self, msg_clb=None):
             self.proc = Popen(self.cmd, stdout=PIPE, stderr=STDOUT, bufsize=1000)
             sleep(2)
 
@@ -395,6 +397,8 @@ class Rsync:
             for line in split_read(self.proc):
                 line = line.decode()
                 if "B/s" in line:
+                    if "xfr" in line:
+                        line = line.split("(xfr")[0]
                     if ":" not in line:
                         bytes_, perc, speed = line.split()
                         eta = "0:00:00"
@@ -406,6 +410,9 @@ class Rsync:
                     self.eta = eta
                 elif line.strip() in self.files:
                     self.count += 1
+
+            if self.proc.poll() != 0:
+                msg_clb(title="Rsync Error", msg=f"Rsync exited with code {self.proc.poll()}.")
             self.bytes = self.tot_bytes
             self.speed = "0B/s"
             self.eta = "Finished"
@@ -413,6 +420,8 @@ class Rsync:
             self.count = len(self.files)
 
         def progress(self):
+            if self.tot_bytes == 0:
+                return 0.0
             return 1.0 * self.bytes / self.tot_bytes
 
     class GenericError(Exception):
@@ -446,6 +455,9 @@ class Rsync:
             attr = self.sync.sftp.lstat(path)
             if S_ISDIR(attr.st_mode) and path[-1] != "/":
                 path += "/"
+            else:
+                # TODO: handle this
+                raise FileExistsError
         return f"{self.sync.conf.get('user')}@{self.sync.conf.get('host')}:{path}"
 
     def gen_job(self, local, remote, uniq, operation=0):
@@ -484,6 +496,7 @@ class Rsync:
                         target = "unknown"
                     if "No such file or directory" in output:
                         ret = -1 if target == "sender" else -2
+            return ret
         else:
             files = []
 
