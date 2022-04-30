@@ -79,7 +79,7 @@ class Game:
         for _i in ("stdout", "stderr"):
             prepare_path(self.conf.get(_i))
         if self.conf.get("exec_in_path"):
-            cwd = {"cwd": os.path.dirname(self.conf.get("exec_path"))}
+            cwd = {"cwd": os.path.dirname(self.conf.get("exec_path", path=True))}
         else:
             cwd = {}
         self._proc = subprocess.Popen(self.args,
@@ -709,7 +709,6 @@ class Bugl:
 
         # setup variables
         o_maxy, o_maxx = -1, -1
-        o_progress = self._progress
         show_completed = False
         request_refresh = False
 
