@@ -262,6 +262,9 @@ class JobRunner:
 class Bugl:
     VERSION = "0.3.3"
 
+    class ConfigConflictException(Exception):
+        pass
+
     def __init__(self, conf: Configs, sync_conf: Configs):
         try:
             from bugl.templates import game_defaults as _c_d
@@ -360,78 +363,72 @@ class Bugl:
             else:
                 raise ValueError
 
-    def check_for_sync(self, win):
-        # TODO: generalize this abomination along Bugl.sync_conf
-        for conf in chain((self.conf, self.sync_c), map(lambda l: l.conf.game_conf, self._games)):
+    def check_for_sync(self, win, progress):
+        def verboser(conf_):
             try:
-                rconf = RConfigs(self.sync, conf.template, conf.config_path)
-                if rconf.newer(conf):
-                    if conf.get("__to_sync__"):
-                        self.dialog(win, "Sync Conf",
-                                    f"Fatal error: there's a conflict in config file {conf.config_path}, remote is "
-                                    f"newer, but local has never been uploaded.")
+                self.sync_conf(conf_, autonomous=False)
+            except Exception as e:
+                if isinstance(e, Configs.MissingPropertyException):
+                    if self.dialog(win, "Sync Conf",
+                                   f"Remote config with path {conf_.config_path} misses a mandatory internal property, "
+                                   f"probably it's outdated, upload local file to remote?", "confirm"):
+                        self.sync_conf(conf_)
+                    else:
                         return -1
-                    rconf.set("__to_sync__", False)
-                    rconf.write_all()
-                    conf.read()
+                elif isinstance(e, Configs.ConfigFormatErrorException):
+                    if self.dialog(win, "Sync Conf",
+                                   f"Remote config with path {conf_.config_path} is corrupted, upload the local one?",
+                                   "confirm"):
+                        self.render_loading(win, "Sync Conf", "Uploading conf...")
+                        self.sync_conf(conf_)
+                    else:
+                        return -2
+                elif isinstance(e, FileNotFoundError):
+                    pass
                 else:
-                    rconf = RConfigs(self.sync, conf.template, conf.config_path, load_from=LOCAL)
-                    rconf.set("__to_sync__", False)
-                    rconf.write_all()
-                    conf.read()
-            except FileNotFoundError:
-                rconf = RConfigs(self.sync, conf.template, conf.config_path, load_from=LOCAL)
-                rconf.write_remote()
-                self.sync_conf(conf)
-            except Configs.MissingPropertyException:
-                if self.dialog(win, "Sync Conf",
-                               f"Remote config with path {conf.config_path} misses a mandatory internal property, "
-                               f"probably it's outdated, upload local file to remote?", "confirm"):
-                    self.render_loading(win, "Sync Conf", "Uploading conf...")
-                    self.sync_conf(conf, force_push=True)
-                else:
-                    return -1
-            except Configs.ConfigFormatErrorException:
-                if self.dialog(win, "Sync Conf",
-                               f"Remote config with path {conf.config_path} is corrupted, upload the local one?",
-                               "confirm"):
-                    self.render_loading(win, "Sync Conf", "Uploading conf...")
-                    self.sync_conf(conf, force_push=True)
-                else:
-                    return -2
+                    raise e
+                self.sync_conf(conf_)
 
-    def sync_conf(self, conf: Configs, force_pull=False, force_push=False, msg_clb=None) -> None:
+        operations = len(self._games) + 2
+        progress.update(1, operations)
+        progress.update_msg("Synchronizing system configs...")
+        if (r_ := verboser(self.conf)) is not None:
+            return r_
+        progress.update_msg("Synchronizing synchronization configs...")
+        progress.update(2, operations)
+        if (r_ := verboser(self.sync_c)) is not None:
+            return r_
+        self.sync_conf(self.sync_c)
+
+        for n, conf in enumerate(map(lambda l: l.conf.game_conf, self._games)):
+            progress.update_msg(f"Synchronizing games configs ({n+1:2d}/{len(self._games):2d})...")
+            progress.update(3 + n, operations)
+            if (r_ := verboser(conf)) is not None:
+                return r_
+
+    @staticmethod
+    def mirror_confs(r_conf: RConfigs, conf: Configs):
+        r_conf.set("__to_sync__", False)
+        r_conf.write_all()
+        conf.read()
+
+    def sync_conf(self, conf: Configs, msg_clb=None, autonomous=True):
         conf.write()
 
-        if force_pull and force_push:
-            raise TypeError("You can only force one action")
-
-        if force_pull:
-            r_conf = RConfigs(self.sync, conf.template, conf.config_path)
-            r_conf.set("__to_sync__", False)
-            r_conf.write_local()
-            conf.read()
-        if force_push:
-            r_conf = RConfigs(self.sync, conf.template, conf.config_path, load_from=LOCAL)
-            r_conf.set("__to_sync__", False)
-            r_conf.write_all()
-            conf.read()
-
         try:
-            r_conf = RConfigs(self.sync, conf.template, conf.config_path)
+            r_conf = RConfigs.from_conf(self.sync, conf)
             if r_conf.newer(conf):
-                r_conf.set("__to_sync__", False)
-                r_conf.write_all()
-                conf.read()
+                if conf.get("__to_sync__"):
+                    raise Bugl.ConfigConflictException
+                self.mirror_confs(r_conf, conf)
             else:
                 r_conf = RConfigs(self.sync, conf.template, conf.config_path, load_from=LOCAL)
-                r_conf.set("__to_sync__", False)
-                r_conf.write_remote()
-        except (Configs.MissingPropertyException, FileNotFoundError):
+                self.mirror_confs(r_conf, conf)
+        except (Configs.MissingPropertyException, Configs.ConfigFormatErrorException, FileNotFoundError) as e:
+            if not autonomous:
+                raise e
             r_conf = RConfigs(self.sync, conf.template, conf.config_path, load_from=LOCAL)
-            r_conf.set("__to_sync__", False)
-            r_conf.write_all()
-        msg_clb(title="Test", msg="OK")
+            self.mirror_confs(r_conf, conf)
 
     def sync_data(self, g: Game, win, operation=Rsync.PULL):
         if self._init_sync(win):
@@ -566,7 +563,7 @@ class Bugl:
             self.progress = 0.0
             self._msg = msg
             self.maxy, self.maxx = self._win.getmaxyx()
-            self._win.addstr(1, 1, self._msg)
+            self._win.addstr(2, 2, self._msg)
             self._l = self.maxx - 4
             self._slices = (1, )
             self._cur_slice = 0
@@ -574,12 +571,15 @@ class Bugl:
             self.update(0, 1)
 
         def set_slices(self, _s=(1, )):
+            for s in _s:
+                if not 0 <= s <= 1:
+                    raise TypeError("Slice must be between 0 and 1")
             self._slices = _s
 
         def update_msg(self, msg):
-            self._win.addstr(1, 1, " "*len(self._msg))
+            self._win.addstr(2, 2, " "*len(self._msg))
             self._msg = msg
-            self._win.addstr(1, 1, self._msg)
+            self._win.addstr(2, 2, self._msg)
 
         def update(self, _p, _t):
             _prog = _p / _t
@@ -589,7 +589,7 @@ class Bugl:
                 _s = self._slices[self._cur_slice-1]
             _e = self._slices[self._cur_slice]
             _str = ("#" * int(_s*self._l))
-            _str += ("#" * int(_prog*(_e-_s)*(self._l+1)))
+            _str += ("#" * int(_prog*(_e-_s)*self._l))
             _str += ("-" * (self._l - len(_str)))
             self._win.addstr(self.maxy-3, 0, _str, h_center=True)
             self._win.addstr(self.maxy-2, 0, f"{round((_s+_prog*(_e-_s))*100, 3)}%", h_center=True)
@@ -726,8 +726,9 @@ class Bugl:
         # check for remote updates
         self.render_loading(scr, "BUGL Startup", "Connecting to remote...")
         if self._init_sync(scr):
-            self.render_loading(scr, "BUGL Startup", "Synchronizing with remote...")
-            if self.check_for_sync(scr) == -1:
+            prog_ = self.dialog(scr, "BUGL Startup", "Synchronizing system configs...", "progress")
+            prog_.update(0, 1)
+            if self.check_for_sync(scr, prog_) == -1:
                 panic("Could not remain synced to remote.")
                 return 1
         else:

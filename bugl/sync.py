@@ -275,6 +275,10 @@ class RConfigs(Configs):
         else:
             raise TypeError("parameter load_from can only be RConfigs.LOCAL or RConfigs.REMOTE")
 
+    @staticmethod
+    def from_conf(sync: Sync, conf: Configs, load_from=REMOTE, raise_for_update_time=True):
+        return RConfigs(sync, conf.template, conf.config_path, load_from, raise_for_update_time)
+
     def compare(self):
         if self.ex_rem and self.ex_loc:
             return False
