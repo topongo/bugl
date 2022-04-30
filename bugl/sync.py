@@ -252,10 +252,11 @@ class Sync:
 
 
 class RConfigs(Configs):
-    def __init__(self, sync: Sync, template, config_path=None, load_from=REMOTE, raise_for_update_time=True):
+    def __init__(self, sync: Sync, template: dict, config_path=None, load_from=REMOTE, raise_for_update_time=True):
         self.sync = sync
         self.ex_loc = os.path.exists(config_path)
         self.ex_rem = sync.exists(config_path)
+        self.loaded_from = load_from
         if load_from == LOCAL:
             if self.ex_loc:
                 Configs.__init__(self, template, config_path=config_path, raise_for_update_time=raise_for_update_time)
@@ -288,14 +289,27 @@ class RConfigs(Configs):
 
     def write_remote(self):
         with self.sync.sftp.open(self.config_path, "w+") as r:
-            self.write(r)
+            Configs.write(self, r)
 
     def write_local(self):
-        self.write()
+        Configs.write(self)
+
+    def write(self, _buffer=None, _indent=True):
+        if self.loaded_from == LOCAL:
+            self.write_local()
+        elif self.loaded_from == REMOTE:
+            self.write_remote()
+
+    def write_all(self):
+        self.write_local()
+        self.write_remote()
+
+    def newer(self, other: Configs):
+        return self.get("__update_time__") > other.get("__update_time__")
 
 
 class Job:
-    def __init__(self, files, tot_bytes, actual_job=None):
+    def __init__(self, files, tot_bytes, actual_job=None, actual_job_args=(), msg_clb=None):
         self.files = files
         self.tot_bytes = tot_bytes
         self.speed = "N/A"
@@ -305,26 +319,28 @@ class Job:
         self.done = False
         self.count = 0
         self.bytes = 0
-        self.progress = 0
+        self.progress_ = 0
         self.display = True
         self.proc = None
         if actual_job is not None and not isinstance(actual_job, Callable):
             raise TypeError(actual_job)
         self.actual_job = actual_job
+        self.actual_job_args = actual_job_args
 
-    def run(self):
+    def run(self, msg_clb):
         if self.actual_job:
-            self.actual_job()
+            self.actual_job(*self.actual_job_args, msg_clb=(msg_clb if msg_clb else lambda l: None))
+        self.progress_ = 1
 
-    def standalone_run(self):
-        self.proc = Thread(target=self.run)
+    def standalone_run(self, msg_clb=None):
+        self.proc = Thread(target=self.run, args=(msg_clb, ) if msg_clb else (lambda l: None, ))
         self.proc.start()
 
     def is_alive(self):
         return self.proc is not None and self.proc.poll() is None
 
     def progress(self):
-        return self.progress
+        return self.progress_
 
 
 class Rsync:
@@ -339,13 +355,10 @@ class Rsync:
             self.count = -1
             self.type = t
             self.speed = "0B/s"
-            self.running = False
-            self.done = False
 
         def run(self):
             self.proc = Popen(self.cmd, stdout=PIPE, stderr=STDOUT, bufsize=1000)
             sleep(2)
-            self.running = True
 
             def split_read(proc):
                 buff = b""
@@ -384,7 +397,7 @@ class Rsync:
                     else:
                         bytes_, perc, speed, eta = line.split()
                     self.bytes = int(bytes_.replace(",", ""))
-                    self.progress = float(perc.replace("%", "")) / 100.0
+                    self.progress_ = float(perc.replace("%", "")) / 100.0
                     self.speed = speed
                     self.eta = eta
                 elif line.strip() in self.files:
@@ -392,10 +405,8 @@ class Rsync:
             self.bytes = self.tot_bytes
             self.speed = "0B/s"
             self.eta = "Finished"
-            self.progress = 1
+            self.progress_ = 1
             self.count = len(self.files)
-            self.done = True
-            self.running = False
 
         def progress(self):
             return 1.0 * self.bytes / self.tot_bytes
@@ -420,9 +431,6 @@ class Rsync:
         for i in s_exclude:
             self.switches.replace(i, "")
         self.proc = None
-        self.pending = []
-        self.running = False
-        self.job = None
 
     def command_gen(self, dry=False):
         return ["rsync", f"-{self.switches}" + ("n" if dry else ""), "-e", f"ssh -p {self.sync.conf.get('port')}"] + \
@@ -499,15 +507,3 @@ class Rsync:
                 return Rsync.Transfer(cmd(False), files, {0: "Pull", 1: "Push"}[operation], tot_bytes)
             else:
                 return ret
-
-    def commit(self):
-        def th():
-            self.running = True
-            for j in self.pending:
-                self.job = j
-                self.job.run()
-            self.job = None
-            self.running = False
-
-        t = Thread(target=th, daemon=True)
-        t.start()
