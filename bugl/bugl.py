@@ -387,6 +387,7 @@ class Bugl:
                     pass
                 else:
                     raise e
+
                 self.sync_conf(conf_)
 
         operations = len(self._games) + 2
@@ -440,7 +441,9 @@ class Bugl:
             for uniq, loc in g.conf.get("data").items():
                 loc = os.path.expanduser(loc)
                 if not os.path.exists(loc):
-                    self.dialog(win, "Sync Data", f"warning: path {loc} does not exists on disk.")
+                    if self.dialog(win, "Sync Data",
+                                   "warning: data on local doesn't exist. Download id?", "confirm"):
+                        self.sync_data(g, win, Rsync.PULL)
                 else:
                     if os.path.isdir(loc) and not os.path.islink(loc) and loc[-1] != "/":
                         loc += "/"
@@ -450,11 +453,9 @@ class Bugl:
                         return
                     if j == -1:
                         if operation == Rsync.PULL:
-                            if not self.dialog(win, "Sync Data",
+                            if self.dialog(win, "Sync Data",
                                                 f"Data folder corresponding to \n{loc}\ndoesn't exists on remote,"
                                                 f" upload it?", "confirm"):
-                                return
-                            else:
                                 if not self.sync.exists(rem):
                                     self.sync.sftp.mkdir(rem)
                                 self.sync_data(g, win, Rsync.PUSH)
@@ -462,8 +463,6 @@ class Bugl:
                             if self.dialog(win, "Sync Data",
                                            "warning: data on local doesn't exist. Download id?", "confirm"):
                                 self.sync_data(g, win, Rsync.PULL)
-                            else:
-                                return
                     return
                 else:
                     self._jobs.add_job(j)
