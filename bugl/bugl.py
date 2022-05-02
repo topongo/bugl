@@ -440,11 +440,7 @@ class Bugl:
             g.rsync = self.gen_rsync(win)
             for uniq, loc in g.conf.get("data").items():
                 loc = os.path.expanduser(loc)
-                if not os.path.exists(loc):
-                    if self.dialog(win, "Sync Data",
-                                   "warning: data on local doesn't exist. Download id?", "confirm"):
-                        self.sync_data(g, win, Rsync.PULL)
-                else:
+                if os.path.exists(loc):
                     if os.path.isdir(loc) and not os.path.islink(loc) and loc[-1] != "/":
                         loc += "/"
                 j = g.rsync.gen_job(loc, rem, uniq, operation=operation)
@@ -884,8 +880,12 @@ class Bugl:
                         self._selected.kill()
             elif inp == ord("t"):
                 # put tests here
-                self.render_loading(scr, "Generating rsync object")
-                self.sync_data(self._selected, scr)
+                if self.dialog(scr, "Sync Data", "Select operation:", "confirm", butts=("Push", "Pull")):
+                    self.render_loading(scr, "Generating rsync object")
+                    self.sync_data(self._selected, scr, Rsync.PUSH)
+                else:
+                    self.render_loading(scr, "Generating rsync object")
+                    self.sync_data(self._selected, scr, Rsync.PULL)
             elif inp == curses.KEY_RESIZE:
                 maxy, maxx = scr.getmaxyx()
                 p_g_select.resize(300, int(maxx/2))
